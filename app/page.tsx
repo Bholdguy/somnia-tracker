@@ -135,94 +135,107 @@ export default function Home() {
 
       console.log("[poll] tick start");
       try {
-        console.log(
-          "[poll] step 1: eth_getBlockByNumber(latest, true) via fetch()"
-        );
-
-        const body = {
-          jsonrpc: "2.0",
-          id: 1,
-          method: "eth_getBlockByNumber",
-          params: ["latest", true],
+        const rpc = async <T,>(
+          id: number,
+          method: string,
+          params: unknown[]
+        ): Promise<T> => {
+          console.log(`[poll] rpc -> ${method}`, params);
+          const res = await fetch(RPC_URL, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
+          });
+          console.log(`[poll] rpc <- ${method} status`, res.status);
+          const json = (await res.json()) as JsonRpcResponse<T>;
+          if (json.error) {
+            console.error("[poll] JSON-RPC error:", json.error);
+            throw new Error(json.error.message);
+          }
+          if (json.result === undefined) {
+            console.error("[poll] missing result in JSON-RPC response:", json);
+            throw new Error("Missing JSON-RPC result");
+          }
+          return json.result;
         };
 
-        const res = await fetch(RPC_URL, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(body),
-        });
+        console.log("[poll] step 1: get latest block number via eth_blockNumber");
+        const latestHex = await rpc<string>(1, "eth_blockNumber", []);
+        const latest = hexToBigInt(latestHex);
+        console.log("[poll] latest block =", latest.toString());
 
-        console.log("[poll] HTTP status:", res.status);
-        const json = (await res.json()) as JsonRpcResponse<{
-          number: string;
-          timestamp: string;
-          transactions: Array<{
-            hash: string;
-            from: string;
-            value: string;
-          }>;
-        }>;
-
-        console.log("[poll] step 2: JSON parsed");
-
-        if (json.error) {
-          console.error("[poll] JSON-RPC error:", json.error);
-          throw new Error(json.error.message);
-        }
-        if (!json.result) {
-          console.error("[poll] missing result in JSON-RPC response:", json);
-          throw new Error("Missing JSON-RPC result");
-        }
-
-        const blockNumber = hexToBigInt(json.result.number);
-        const timestampSeconds = hexToBigInt(json.result.timestamp);
-        const timestampMs = Number(timestampSeconds) * 1000;
-
-        console.log("[poll] step 3: latest block =", blockNumber.toString());
+        const start = latest > 4n ? latest - 4n : 0n;
         console.log(
-          "[poll] step 4: txs in block =",
-          Array.isArray(json.result.transactions)
-            ? json.result.transactions.length
-            : 0
+          "[poll] step 2: fetching last 5 blocks:",
+          start.toString(),
+          "->",
+          latest.toString()
         );
 
         const matching: WhaleTransaction[] = [];
 
-        console.log("[poll] step 5: loop transactions & filter value > 0");
-        for (const tx of json.result.transactions ?? []) {
-          const hash = tx?.hash;
-          if (!hash) continue;
-          if (seenTxsRef.current.has(hash)) continue;
+        for (let bn = start; bn <= latest; bn++) {
+          const bnHex = `0x${bn.toString(16)}`;
+          console.log("[poll] step 3: fetch block", bn.toString(), bnHex);
 
-          const valueWei = hexToBigInt(tx.value);
-          if (valueWei < MIN_VALUE_WEI) continue;
+          const block = await rpc<{
+            number: string;
+            timestamp: string;
+            transactions: Array<{
+              hash: string;
+              from: string;
+              value: string;
+            }>;
+          }>(2, "eth_getBlockByNumber", [bnHex, true]);
 
-          seenTxsRef.current.add(hash);
+          const blockNumber = hexToBigInt(block.number);
+          const timestampSeconds = hexToBigInt(block.timestamp);
+          const timestampMs = Number(timestampSeconds) * 1000;
 
-          matching.push({
-            hash,
-            walletAddress: tx.from ?? "0x",
-            amountRaw: valueWei,
-            amountFormatted: formatSttFromWei(valueWei),
-            timestamp: new Date(timestampMs).toLocaleString(),
-            blockNumber,
-          });
+          const txs = Array.isArray(block.transactions) ? block.transactions : [];
+          console.log(
+            "[poll] block",
+            blockNumber.toString(),
+            "txs:",
+            txs.length
+          );
+
+          console.log("[poll] step 4: scan txs; filter value > 0");
+          for (const tx of txs) {
+            const hash = tx?.hash;
+            if (!hash) continue;
+            if (seenTxsRef.current.has(hash)) continue;
+
+            const valueWei = hexToBigInt(tx.value);
+            if (valueWei < MIN_VALUE_WEI) continue;
+
+            seenTxsRef.current.add(hash);
+
+            matching.push({
+              hash,
+              walletAddress: tx.from ?? "0x",
+              amountRaw: valueWei,
+              amountFormatted: formatSttFromWei(valueWei),
+              timestamp: new Date(timestampMs).toLocaleString(),
+              blockNumber,
+            });
+          }
         }
 
-        console.log("[poll] step 6: matching tx count =", matching.length);
+        console.log("[poll] step 5: matching tx count =", matching.length);
 
         if (!isCancelled && matching.length > 0) {
-          console.log("[poll] step 7: adding to feed");
+          console.log("[poll] step 6: adding to feed");
           setEvents((prev) => {
             const next = [...matching, ...prev];
             return next.slice(0, MAX_EVENTS);
           });
         } else {
-          console.log("[poll] step 7: nothing to add this tick");
+          console.log("[poll] step 6: nothing to add this tick");
         }
 
         if (!isCancelled) {
-          lastProcessedBlockRef.current = blockNumber;
+          lastProcessedBlockRef.current = latest;
           setIsConnected(true);
           setError(null);
           setLastUpdatedAt(new Date());
