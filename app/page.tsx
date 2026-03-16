@@ -49,12 +49,13 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [events, setEvents] = useState<WhaleTransaction[]>([]);
   const [walletFilter, setWalletFilter] = useState("");
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
   const seenTxsRef = useRef<Set<Hex>>(new Set());
 
   const stats = useMemo(() => {
     if (events.length === 0) {
       return {
-        totalWhales: 0,
+        totalTxs: 0,
         largestRaw: 0n,
         largestFormatted: "0 STT",
         totalVolumeFormatted: "0 STT",
@@ -70,12 +71,42 @@ export default function Home() {
     }
 
     return {
-      totalWhales: events.length,
+      totalTxs: events.length,
       largestRaw,
       largestFormatted: `${formatEther(largestRaw)} STT`,
       totalVolumeFormatted: `${formatEther(totalVolume)} STT`,
     };
   }, [events]);
+
+  const classifySize = useCallback((amountRaw: bigint) => {
+    const ONE_STT = 10n ** 18n;
+    const TEN_STT = 10n * ONE_STT;
+    if (amountRaw >= TEN_STT) return "large";
+    if (amountRaw >= ONE_STT) return "medium";
+    return "small";
+  }, []);
+
+  const amountColorClass = useCallback(
+    (amountRaw: bigint) => {
+      const size = classifySize(amountRaw);
+      if (size === "large") return "text-emerald-300";
+      if (size === "medium") return "text-amber-300";
+      return "text-slate-100";
+    },
+    [classifySize]
+  );
+
+  const sizeDotClass = useCallback(
+    (amountRaw: bigint) => {
+      const size = classifySize(amountRaw);
+      if (size === "large")
+        return "bg-emerald-400 shadow-[0_0_14px_rgba(16,185,129,0.95)]";
+      if (size === "medium")
+        return "bg-amber-300 shadow-[0_0_14px_rgba(252,211,77,0.65)]";
+      return "bg-slate-200/90 shadow-[0_0_12px_rgba(226,232,240,0.35)]";
+    },
+    [classifySize]
+  );
 
   const publicClient = useMemo(
     () =>
@@ -152,6 +183,7 @@ export default function Home() {
         if (!isCancelled) {
           setIsConnected(true);
           setError(null);
+          setLastUpdatedAt(new Date());
         }
       } catch (err: any) {
         console.error("HTTP polling error", err);
@@ -211,8 +243,101 @@ export default function Home() {
         .somnia-row-enter {
           animation: somnia-fade-in-up 420ms ease-out both;
         }
+
+        @keyframes somnia-marquee {
+          0% {
+            transform: translate3d(0, 0, 0);
+          }
+          100% {
+            transform: translate3d(-50%, 0, 0);
+          }
+        }
+
+        .somnia-marquee {
+          animation: somnia-marquee 22s linear infinite;
+          will-change: transform;
+        }
       `}</style>
-      <main className="mx-auto flex min-h-screen max-w-6xl flex-col gap-8 px-4 py-10 sm:px-6 lg:px-8">
+      <div className="sticky top-0 z-50 border-b border-slate-800/80 bg-slate-950/90 backdrop-blur">
+        <div className="relative overflow-hidden">
+          <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-emerald-500/10 via-teal-500/10 to-cyan-500/10" />
+          <div className="flex items-center gap-3 px-4 py-2 text-[11px] text-slate-300 sm:px-6">
+            <span className="inline-flex items-center gap-2 rounded-full bg-slate-900/60 px-3 py-1 ring-1 ring-slate-700/70">
+              <span
+                className={[
+                  "h-1.5 w-1.5 rounded-full",
+                  isConnected
+                    ? "bg-emerald-400 animate-pulse shadow-[0_0_18px_rgba(16,185,129,1)]"
+                    : "bg-slate-400 shadow-[0_0_10px_rgba(148,163,184,0.6)]",
+                ].join(" ")}
+              />
+              <span className="font-semibold text-slate-100">
+                {isConnected ? "LIVE" : "SYNCING"}
+              </span>
+            </span>
+            <div className="min-w-0 flex-1 overflow-hidden">
+              <div className="somnia-marquee flex w-[200%] items-center gap-10 whitespace-nowrap">
+                <div className="flex w-1/2 items-center gap-10">
+                  <span className="text-slate-400">Somnia Testnet</span>
+                  <span>
+                    Total detected:{" "}
+                    <span className="font-semibold text-slate-100">
+                      {stats.totalTxs}
+                    </span>
+                  </span>
+                  <span>
+                    Total volume:{" "}
+                    <span className="font-semibold text-emerald-200">
+                      {stats.totalVolumeFormatted}
+                    </span>
+                  </span>
+                  <span>
+                    Largest tx:{" "}
+                    <span className="font-semibold text-teal-200">
+                      {stats.largestFormatted}
+                    </span>
+                  </span>
+                  <span className="text-slate-500">
+                    Threshold: {WHALE_THRESHOLD_LABEL}
+                  </span>
+                </div>
+                <div className="flex w-1/2 items-center gap-10">
+                  <span className="text-slate-400">Somnia Testnet</span>
+                  <span>
+                    Total detected:{" "}
+                    <span className="font-semibold text-slate-100">
+                      {stats.totalTxs}
+                    </span>
+                  </span>
+                  <span>
+                    Total volume:{" "}
+                    <span className="font-semibold text-emerald-200">
+                      {stats.totalVolumeFormatted}
+                    </span>
+                  </span>
+                  <span>
+                    Largest tx:{" "}
+                    <span className="font-semibold text-teal-200">
+                      {stats.largestFormatted}
+                    </span>
+                  </span>
+                  <span className="text-slate-500">
+                    Threshold: {WHALE_THRESHOLD_LABEL}
+                  </span>
+                </div>
+              </div>
+            </div>
+            <div className="hidden shrink-0 text-[11px] text-slate-400 sm:block">
+              Last updated:{" "}
+              <span className="font-semibold text-slate-200">
+                {lastUpdatedAt ? lastUpdatedAt.toLocaleTimeString() : "—"}
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <main className="mx-auto flex min-h-screen max-w-6xl flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8">
         <header className="relative overflow-hidden rounded-3xl border border-slate-800/70 bg-slate-950/50 px-5 py-6 shadow-[0_18px_80px_rgba(15,23,42,0.85)] sm:px-8 sm:py-7">
           <div className="pointer-events-none absolute inset-0">
             <div className="somnia-hero-bg absolute -inset-24 opacity-60 blur-3xl">
@@ -223,78 +348,86 @@ export default function Home() {
 
           <div className="relative flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div className="space-y-2">
-            <div className="inline-flex items-center gap-2 rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-300 ring-1 ring-emerald-500/40">
-              <span className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_12px_rgba(16,185,129,0.9)]" />
-              Somnia Whale Tracker
+              <div className="inline-flex items-center gap-2 rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-300 ring-1 ring-emerald-500/40">
+                <span className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_12px_rgba(16,185,129,0.9)]" />
+                Somnia Whale Tracker
+              </div>
+              <h1 className="text-2xl font-semibold tracking-tight text-slate-50 sm:text-3xl">
+                Trading-style transaction feed
+              </h1>
+              <p className="max-w-2xl text-sm text-slate-400">
+                A dense, terminal-style stream of detected transfers on Somnia
+                Testnet. Threshold:{" "}
+                <span className="font-semibold text-teal-300">
+                  {WHALE_THRESHOLD_LABEL}
+                </span>
+                .
+              </p>
             </div>
-            <h1 className="text-2xl font-semibold tracking-tight text-slate-50 sm:text-3xl">
-              Real-time large transaction monitor
-            </h1>
-            <p className="max-w-2xl text-sm text-slate-400">
-              Watching Somnia Testnet for whale-sized transfers in real time.
-              Threshold:{" "}
-              <span className="font-semibold text-teal-300">
-                {WHALE_THRESHOLD_LABEL}
-              </span>{" "}
-              per transaction.
-            </p>
-          </div>
 
-          <div className="flex flex-col items-end gap-3 text-sm">
-            <div className="inline-flex items-center gap-2 rounded-full bg-slate-900/60 px-3 py-1 ring-1 ring-slate-700/80">
-              <span
-                className={[
-                  "h-2 w-2 rounded-full bg-emerald-400",
-                  isConnected
-                    ? "animate-pulse shadow-[0_0_18px_rgba(16,185,129,1)]"
-                    : "shadow-[0_0_10px_rgba(16,185,129,0.6)]",
-                ].join(" ")}
-              />
-              <span className="font-medium text-slate-100">
-                {isConnected ? "Live" : "Connecting..."}
-              </span>
-            </div>
-            <div className="inline-flex items-center gap-2 rounded-full bg-slate-900/60 px-3 py-1 text-xs text-slate-400 ring-1 ring-slate-800">
-              <span className="h-1.5 w-1.5 rounded-full bg-teal-400" />
-              Somnia Testnet • RPC `dream-rpc.somnia.network`
-            </div>
+            <div className="flex flex-col items-end gap-3 text-sm">
+              <div className="inline-flex items-center gap-2 rounded-full bg-slate-900/60 px-3 py-1 ring-1 ring-slate-700/80">
+                <span
+                  className={[
+                    "h-2 w-2 rounded-full bg-emerald-400",
+                    isConnected
+                      ? "animate-pulse shadow-[0_0_18px_rgba(16,185,129,1)]"
+                      : "shadow-[0_0_10px_rgba(16,185,129,0.6)]",
+                  ].join(" ")}
+                />
+                <span className="font-medium text-slate-100">
+                  {isConnected ? "Live" : "Connecting..."}
+                </span>
+              </div>
+              <div className="inline-flex items-center gap-2 rounded-full bg-slate-900/60 px-3 py-1 text-xs text-slate-400 ring-1 ring-slate-800">
+                <span className="h-1.5 w-1.5 rounded-full bg-teal-400" />
+                Somnia Testnet • RPC `dream-rpc.somnia.network`
+              </div>
+              <div className="text-xs text-slate-500">
+                Last updated:{" "}
+                <span className="font-semibold text-slate-200">
+                  {lastUpdatedAt ? lastUpdatedAt.toLocaleString() : "—"}
+                </span>
+              </div>
             </div>
           </div>
         </header>
 
-        <section className="grid gap-4 sm:grid-cols-3">
-          <div className="space-y-1 rounded-2xl border border-teal-500/20 bg-slate-950/70 p-4 shadow-[0_0_0_1px_rgba(45,212,191,0.08),0_18px_60px_rgba(15,23,42,0.75),0_0_28px_rgba(45,212,191,0.10)] sm:p-5">
-            <p className="text-xs font-medium uppercase tracking-[0.14em] text-slate-400">
-              Total Whales Detected
-            </p>
-            <p className="text-2xl font-semibold text-emerald-300">
-              {stats.totalWhales}
-            </p>
+        <section className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-wrap gap-2">
+            <div className="rounded-xl border border-teal-500/20 bg-slate-950/70 px-3 py-2 shadow-[0_0_0_1px_rgba(45,212,191,0.06),0_12px_40px_rgba(15,23,42,0.65),0_0_18px_rgba(45,212,191,0.10)]">
+              <div className="text-[10px] font-medium uppercase tracking-[0.16em] text-slate-500">
+                Total
+              </div>
+              <div className="text-sm font-semibold text-slate-100">
+                {stats.totalTxs}
+              </div>
+            </div>
+            <div className="rounded-xl border border-teal-500/20 bg-slate-950/70 px-3 py-2 shadow-[0_0_0_1px_rgba(45,212,191,0.06),0_12px_40px_rgba(15,23,42,0.65),0_0_18px_rgba(45,212,191,0.10)]">
+              <div className="text-[10px] font-medium uppercase tracking-[0.16em] text-slate-500">
+                Largest
+              </div>
+              <div className="text-sm font-semibold text-teal-200">
+                {stats.largestFormatted}
+              </div>
+            </div>
+            <div className="rounded-xl border border-teal-500/20 bg-slate-950/70 px-3 py-2 shadow-[0_0_0_1px_rgba(45,212,191,0.06),0_12px_40px_rgba(15,23,42,0.65),0_0_18px_rgba(45,212,191,0.10)]">
+              <div className="text-[10px] font-medium uppercase tracking-[0.16em] text-slate-500">
+                Volume
+              </div>
+              <div className="text-sm font-semibold text-emerald-200">
+                {stats.totalVolumeFormatted}
+              </div>
+            </div>
           </div>
-          <div className="space-y-1 rounded-2xl border border-teal-500/20 bg-slate-950/70 p-4 shadow-[0_0_0_1px_rgba(45,212,191,0.08),0_18px_60px_rgba(15,23,42,0.75),0_0_28px_rgba(45,212,191,0.10)] sm:p-5">
-            <p className="text-xs font-medium uppercase tracking-[0.14em] text-slate-400">
-              Largest Transaction
-            </p>
-            <p className="text-lg font-semibold text-teal-300">
-              {stats.largestFormatted}
-            </p>
-          </div>
-          <div className="space-y-1 rounded-2xl border border-teal-500/20 bg-slate-950/70 p-4 shadow-[0_0_0_1px_rgba(45,212,191,0.08),0_18px_60px_rgba(15,23,42,0.75),0_0_28px_rgba(45,212,191,0.10)] sm:p-5">
-            <p className="text-xs font-medium uppercase tracking-[0.14em] text-slate-400">
-              Total Volume
-            </p>
-            <p className="text-lg font-semibold text-emerald-200">
-              {stats.totalVolumeFormatted}
-            </p>
-          </div>
-        </section>
 
-        {error && (
-          <div className="rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">
-            <span className="font-medium">Connection issue:</span>{" "}
-            <span>{error}</span>
-          </div>
-        )}
+          {error && (
+            <div className="rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-xs text-red-200">
+              <span className="font-medium">Connection issue:</span>{" "}
+              <span>{error}</span>
+            </div>
+          )}
+        </section>
 
         <section className="flex flex-1 flex-col gap-4">
           <div className="flex items-center justify-between gap-4">
@@ -303,8 +436,7 @@ export default function Home() {
                 {filteredEvents.length}
               </span>
               <span>
-                Whale transactions detected in this session. Newest appears at
-                the top.
+                Detected transactions (newest first).
               </span>
             </div>
             <button
@@ -357,7 +489,8 @@ export default function Home() {
             <div className="pointer-events-none absolute inset-x-0 top-0 h-24 bg-gradient-to-b from-emerald-500/15 via-transparent to-transparent blur-2xl" />
 
             <div className="relative h-full">
-              <div className="grid grid-cols-[minmax(0,3fr)_minmax(0,2fr)_minmax(0,3fr)_minmax(0,2fr)] gap-4 border-b border-slate-800/80 bg-slate-950/90 px-4 py-3 text-xs font-medium uppercase tracking-wide text-slate-400 sm:px-6">
+              <div className="grid grid-cols-[16px_minmax(0,2.6fr)_minmax(0,1.6fr)_minmax(0,3fr)_minmax(0,1.7fr)] gap-3 border-b border-slate-800/80 bg-slate-950/90 px-4 py-2 text-[10px] font-medium uppercase tracking-[0.16em] text-slate-500 sm:px-6">
+                <div />
                 <div>Wallet</div>
                 <div>Amount</div>
                 <div>Transaction</div>
@@ -382,21 +515,34 @@ export default function Home() {
                     {filteredEvents.map((event) => (
                       <li
                         key={`${event.hash}-${event.timestamp}`}
-                        className="somnia-row-enter group rounded-xl border border-slate-800/70 bg-slate-950/80 px-3 py-3 text-xs text-slate-200 shadow-[0_10px_40px_rgba(15,23,42,0.7)] transition hover:border-teal-500/80 hover:bg-slate-900/80 sm:px-4 sm:text-sm"
+                        className="somnia-row-enter group rounded-lg border border-slate-800/70 bg-slate-950/70 px-3 py-2 text-[11px] text-slate-200 shadow-[0_10px_40px_rgba(15,23,42,0.65)] transition hover:border-teal-500/80 hover:bg-slate-900/70 sm:px-4"
                       >
-                        <div className="grid grid-cols-[minmax(0,3fr)_minmax(0,2fr)_minmax(0,3fr)_minmax(0,2fr)] items-center gap-3">
+                        <div className="grid grid-cols-[16px_minmax(0,2.6fr)_minmax(0,1.6fr)_minmax(0,3fr)_minmax(0,1.7fr)] items-center gap-3">
+                          <span
+                            className={[
+                              "h-2.5 w-2.5 rounded-full",
+                              sizeDotClass(event.amountRaw),
+                            ].join(" ")}
+                            aria-hidden="true"
+                            title={`Size: ${classifySize(event.amountRaw)}`}
+                          />
                           <div className="flex min-w-0 items-center gap-2">
-                            <span className="text-base leading-none">🐋</span>
+                            <span className="text-sm leading-none">🐋</span>
                             <a
                               href={`https://shannon-explorer.somnia.network/address/${event.walletAddress}`}
                               target="_blank"
                               rel="noreferrer noopener"
-                              className="min-w-0 truncate font-mono text-[11px] text-slate-300 underline-offset-2 hover:text-teal-300 hover:underline sm:text-xs"
+                              className="min-w-0 truncate font-mono text-[11px] text-slate-200 underline-offset-2 hover:text-teal-200 hover:underline"
                             >
                               {event.walletAddress}
                             </a>
                           </div>
-                          <div className="font-semibold text-emerald-300">
+                          <div
+                            className={[
+                              "font-semibold tabular-nums",
+                              amountColorClass(event.amountRaw),
+                            ].join(" ")}
+                          >
                             {event.amountFormatted}
                           </div>
                           <div className="flex flex-col gap-1">
@@ -404,7 +550,7 @@ export default function Home() {
                               href={`https://shannon-explorer.somnia.network/tx/${event.hash}`}
                               target="_blank"
                               rel="noreferrer noopener"
-                              className="truncate font-mono text-[11px] text-slate-400 underline-offset-2 hover:text-teal-300 hover:underline sm:text-xs"
+                              className="truncate font-mono text-[11px] text-slate-400 underline-offset-2 hover:text-teal-200 hover:underline"
                             >
                               {event.hash}
                             </a>
@@ -414,7 +560,7 @@ export default function Home() {
                               </span>
                             )}
                           </div>
-                          <div className="text-right text-[11px] text-slate-300 sm:text-xs">
+                          <div className="text-right text-[11px] text-slate-300">
                             {event.timestamp}
                           </div>
                         </div>
