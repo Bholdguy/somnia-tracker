@@ -1,36 +1,49 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Somnia Whale Tracker Dashboard
 
-## Getting Started
+A real-time (near real-time) whale tracker dashboard for the **Somnia blockchain (Testnet)**. It monitors transactions, highlights large value transfers, and presents them in a clean dark-mode UI with teal/green accents.
 
-First, run the development server:
+## How Somnia Reactivity SDK is used
+
+This project uses the **`@somnia-chain/reactivity`** SDK as the intended real-time transport for subscribing to on-chain activity via WebSockets (Reactivity subscriptions).
+
+In some environments, the Somnia Testnet WebSocket RPC may be unavailable or blocked. In the current implementation, the app falls back to **HTTP polling** via `viem` (fetching the latest block and scanning transactions) to keep the dashboard functional using:
+
+- **RPC**: `https://dream-rpc.somnia.network`
+
+## Features
+
+- **Live feed** of detected whale transactions (newest first)
+- **Stats bar**: Total whales detected, largest transaction, total volume
+- **Explorer links**:
+  - Wallet → `https://shannon-explorer.somnia.network/address/[wallet]`
+  - Tx hash → `https://shannon-explorer.somnia.network/tx/[hash]`
+- **Modern dark UI** with teal/green accents (Tailwind CSS)
+- **Configurable threshold** (currently set low for testnet visibility)
+
+## How to run locally
+
+Install dependencies:
+
+```bash
+npm install
+```
+
+Start the dev server:
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open `http://localhost:3000`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Deployed URL
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+`https://somnia-tracker.vercel.app`
 
-## Learn More
+## Tech stack
 
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- **Next.js**
+- **TypeScript**
+- **Tailwind CSS**
+- **Somnia Reactivity SDK** (`@somnia-chain/reactivity`)
+- **viem**
