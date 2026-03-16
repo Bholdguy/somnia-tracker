@@ -1,56 +1,60 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  Address,
-  Hex,
-  createPublicClient,
-  defineChain,
-  formatEther,
-  http,
-} from "viem";
+
+const RPC_URL = "/api/blocks";
+const WEI_PER_STT = 10n ** 18n;
+const MIN_VALUE_WEI = 1n; // value > 0
+const MIN_VALUE_LABEL = "> 0 STT";
 
 type WhaleTransaction = {
-  hash: Hex;
-  walletAddress: Address;
+  hash: string;
+  walletAddress: string;
   amountRaw: bigint;
   amountFormatted: string;
   timestamp: string;
   blockNumber?: bigint;
 };
 
-const SOMNIA_TESTNET = defineChain({
-  id: 50312,
-  name: "Somnia Testnet",
-  nativeCurrency: {
-    name: "Somnia Testnet Token",
-    symbol: "STT",
-    decimals: 18,
-  },
-  rpcUrls: {
-    default: {
-      http: ["https://dream-rpc.somnia.network"],
-      webSocket: ["wss://dream-rpc.somnia.network/ws"],
-    },
-    public: {
-      http: ["https://dream-rpc.somnia.network"],
-      webSocket: ["wss://dream-rpc.somnia.network/ws"],
-    },
-  },
-});
-
-// 0.01 STT with 18 decimals
-const WHALE_THRESHOLD_WEI = 10n ** 16n;
-const WHALE_THRESHOLD_LABEL = `${formatEther(WHALE_THRESHOLD_WEI)} STT`;
 const MAX_EVENTS = 50;
 
+type JsonRpcResponse<T> = {
+  jsonrpc: "2.0";
+  id: number;
+  result?: T;
+  error?: { code: number; message: string; data?: unknown };
+};
+
+function hexToBigInt(value: string | undefined | null): bigint {
+  if (!value) return 0n;
+  try {
+    return BigInt(value);
+  } catch {
+    return 0n;
+  }
+}
+
+function formatSttFromWei(wei: bigint, decimals = 6): string {
+  const negative = wei < 0n;
+  const abs = negative ? -wei : wei;
+  const whole = abs / WEI_PER_STT;
+  const frac = abs % WEI_PER_STT;
+
+  const fracStr = frac.toString().padStart(18, "0").slice(0, decimals);
+  const trimmedFrac = fracStr.replace(/0+$/, "");
+  const sign = negative ? "-" : "";
+  return trimmedFrac.length > 0
+    ? `${sign}${whole.toString()}.${trimmedFrac} STT`
+    : `${sign}${whole.toString()} STT`;
+}
 export default function Home() {
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [events, setEvents] = useState<WhaleTransaction[]>([]);
   const [walletFilter, setWalletFilter] = useState("");
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
-  const seenTxsRef = useRef<Set<Hex>>(new Set());
+  const seenTxsRef = useRef<Set<string>>(new Set());
+  const lastProcessedBlockRef = useRef<bigint | null>(null);
 
   const stats = useMemo(() => {
     if (events.length === 0) {
@@ -73,14 +77,14 @@ export default function Home() {
     return {
       totalTxs: events.length,
       largestRaw,
-      largestFormatted: `${formatEther(largestRaw)} STT`,
-      totalVolumeFormatted: `${formatEther(totalVolume)} STT`,
+      largestFormatted: formatSttFromWei(largestRaw),
+      totalVolumeFormatted: formatSttFromWei(totalVolume),
     };
   }, [events]);
 
   const classifySize = useCallback((amountRaw: bigint) => {
-    const ONE_STT = 10n ** 18n;
-    const TEN_STT = 10n * ONE_STT;
+    const ONE_STT = WEI_PER_STT;
+    const TEN_STT = 10n * WEI_PER_STT;
     if (amountRaw >= TEN_STT) return "large";
     if (amountRaw >= ONE_STT) return "medium";
     return "small";
@@ -108,17 +112,9 @@ export default function Home() {
     [classifySize]
   );
 
-  const publicClient = useMemo(
-    () =>
-      createPublicClient({
-        chain: SOMNIA_TESTNET,
-        transport: http("https://dream-rpc.somnia.network"),
-      }),
-    []
-  );
-
   const clearFeed = useCallback(() => {
     seenTxsRef.current = new Set();
+    lastProcessedBlockRef.current = null;
     setEvents([]);
   }, []);
 
@@ -131,84 +127,184 @@ export default function Home() {
   }, [events, normalizedWalletFilter]);
 
   useEffect(() => {
+    console.log("[Home] mounted. Starting raw JSON-RPC polling.");
     let isCancelled = false;
 
-    const poll = async () => {
+    const pollOnce = async () => {
       if (isCancelled) return;
+
+      console.log("[poll] tick start");
       try {
-        const block = await publicClient.getBlock({
-          blockTag: "latest",
-          includeTransactions: true,
+        console.log(
+          "[poll] step 1: eth_getBlockByNumber(latest, true) via fetch()"
+        );
+
+        const body = {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "eth_getBlockByNumber",
+          params: ["latest", true],
+        };
+
+        const res = await fetch(RPC_URL, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
         });
 
-        const timestampSeconds = (block as any).timestamp;
-        const timestampMs =
-          typeof timestampSeconds === "bigint"
-            ? Number(timestampSeconds) * 1000
-            : typeof timestampSeconds === "number"
-            ? timestampSeconds * 1000
-            : Date.now();
+        console.log("[poll] HTTP status:", res.status);
+        const json = (await res.json()) as JsonRpcResponse<{
+          number: string;
+          timestamp: string;
+          transactions: Array<{
+            hash: string;
+            from: string;
+            value: string;
+          }>;
+        }>;
 
-        const newWhales: WhaleTransaction[] = [];
+        console.log("[poll] step 2: JSON parsed");
 
-        for (const tx of block.transactions) {
-          const hash = tx.hash as Hex;
+        if (json.error) {
+          console.error("[poll] JSON-RPC error:", json.error);
+          throw new Error(json.error.message);
+        }
+        if (!json.result) {
+          console.error("[poll] missing result in JSON-RPC response:", json);
+          throw new Error("Missing JSON-RPC result");
+        }
+
+        const blockNumber = hexToBigInt(json.result.number);
+        const timestampSeconds = hexToBigInt(json.result.timestamp);
+        const timestampMs = Number(timestampSeconds) * 1000;
+
+        console.log("[poll] step 3: latest block =", blockNumber.toString());
+        console.log(
+          "[poll] step 4: txs in block =",
+          Array.isArray(json.result.transactions)
+            ? json.result.transactions.length
+            : 0
+        );
+
+        const matching: WhaleTransaction[] = [];
+
+        console.log("[poll] step 5: loop transactions & filter value > 0");
+        for (const tx of json.result.transactions ?? []) {
+          const hash = tx?.hash;
+          if (!hash) continue;
           if (seenTxsRef.current.has(hash)) continue;
+
+          const valueWei = hexToBigInt(tx.value);
+          if (valueWei < MIN_VALUE_WEI) continue;
+
           seenTxsRef.current.add(hash);
 
-          const value = (tx as any).value ?? 0n;
-          const isWhale = value >= WHALE_THRESHOLD_WEI;
-          if (!isWhale) continue;
-
-          const walletAddress = (tx as any).from as Address;
-          const amountFormatted = `${formatEther(value)} STT`;
-
-          newWhales.push({
+          matching.push({
             hash,
-            walletAddress,
-            amountRaw: value,
-            amountFormatted,
+            walletAddress: tx.from ?? "0x",
+            amountRaw: valueWei,
+            amountFormatted: formatSttFromWei(valueWei),
             timestamp: new Date(timestampMs).toLocaleString(),
-            blockNumber: block.number,
+            blockNumber,
           });
         }
 
-        if (newWhales.length > 0 && !isCancelled) {
+        console.log("[poll] step 6: matching tx count =", matching.length);
+
+        if (!isCancelled && matching.length > 0) {
+          console.log("[poll] step 7: adding to feed");
           setEvents((prev) => {
-            const next = [...newWhales, ...prev];
+            const next = [...matching, ...prev];
             return next.slice(0, MAX_EVENTS);
           });
+        } else {
+          console.log("[poll] step 7: nothing to add this tick");
         }
 
         if (!isCancelled) {
+          lastProcessedBlockRef.current = blockNumber;
           setIsConnected(true);
           setError(null);
           setLastUpdatedAt(new Date());
         }
-      } catch (err: any) {
-        console.error("HTTP polling error", err);
+
+        console.log("[poll] tick end");
+      } catch (e) {
+        console.error("[poll] error during tick:", e);
         if (!isCancelled) {
-          setError(err.message ?? "Failed to poll Somnia RPC");
           setIsConnected(false);
+          setError(e instanceof Error ? e.message : String(e));
         }
       }
     };
 
-    // Initial poll, then interval
-    void poll();
+    // Initial poll, then interval every 5 seconds
+    void pollOnce();
     const intervalId = setInterval(() => {
-      void poll();
+      void pollOnce();
     }, 5000);
 
     return () => {
+      console.log("[Home] unmount. Stopping polling.");
       isCancelled = true;
       clearInterval(intervalId);
     };
-  }, [publicClient]);
+  }, []);
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 antialiased">
+    <div className="min-h-screen bg-[#0a0a0f] text-slate-100 antialiased">
       <style jsx global>{`
+        :root {
+          --space: #0a0a0f;
+          --cyan: #00ffff;
+          --neon: #00ff88;
+          --grid: rgba(0, 255, 255, 0.08);
+          --scan: rgba(255, 255, 255, 0.04);
+          --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+            "Liberation Mono", "Courier New", monospace;
+        }
+
+        html,
+        body {
+          background: var(--space);
+        }
+
+        .font-terminal {
+          font-family: var(--mono);
+          font-variant-numeric: tabular-nums;
+        }
+
+        @keyframes neon-pulse {
+          0% {
+            box-shadow: 0 0 0 rgba(0, 255, 136, 0);
+          }
+          40% {
+            box-shadow: 0 0 18px rgba(0, 255, 136, 0.9),
+              0 0 42px rgba(0, 255, 255, 0.25);
+          }
+          100% {
+            box-shadow: 0 0 0 rgba(0, 255, 136, 0);
+          }
+        }
+
+        @keyframes matrix-drift {
+          0% {
+            transform: translate3d(0, 0, 0);
+          }
+          100% {
+            transform: translate3d(0, 240px, 0);
+          }
+        }
+
+        @keyframes scanline {
+          0% {
+            transform: translate3d(0, -20%, 0);
+          }
+          100% {
+            transform: translate3d(0, 120%, 0);
+          }
+        }
+
         @keyframes somnia-hero-gradient {
           0% {
             transform: translate3d(-10%, -10%, 0) scale(1);
@@ -257,12 +353,47 @@ export default function Home() {
           animation: somnia-marquee 22s linear infinite;
           will-change: transform;
         }
+
+        .ticker-glow {
+          text-shadow: 0 0 10px rgba(0, 255, 255, 0.35),
+            0 0 24px rgba(0, 255, 136, 0.25);
+        }
+
+        .neon-border {
+          border-color: rgba(0, 255, 255, 0.22);
+          box-shadow: 0 0 0 1px rgba(0, 255, 255, 0.12),
+            0 0 26px rgba(0, 255, 255, 0.10),
+            0 0 42px rgba(0, 255, 136, 0.06);
+        }
+
+        .terminal-scanline {
+          animation: scanline 5.5s linear infinite;
+        }
+
+        .matrix-bg {
+          animation: matrix-drift 7s linear infinite;
+          will-change: transform;
+        }
       `}</style>
-      <div className="sticky top-0 z-50 border-b border-slate-800/80 bg-slate-950/90 backdrop-blur">
+
+      {/* Terminal overlays */}
+      <div className="pointer-events-none fixed inset-0 -z-10">
+        {/* Grid */}
+        <div className="absolute inset-0 opacity-60 [background-image:linear-gradient(to_right,var(--grid)_1px,transparent_1px),linear-gradient(to_bottom,var(--grid)_1px,transparent_1px)] [background-size:44px_44px]" />
+        {/* Subtle matrix drift */}
+        <div className="matrix-bg absolute inset-0 opacity-35 [background-image:repeating-linear-gradient(180deg,rgba(0,255,136,0.12)_0px,rgba(0,255,136,0.12)_1px,transparent_1px,transparent_14px)] [background-size:100%_240px]" />
+        {/* Scanlines */}
+        <div className="absolute inset-0 opacity-30 [background-image:repeating-linear-gradient(180deg,var(--scan)_0px,var(--scan)_1px,transparent_2px,transparent_4px)]" />
+        {/* Sweeping scanline */}
+        <div className="terminal-scanline absolute -top-1/3 left-0 right-0 h-40 bg-gradient-to-b from-transparent via-[rgba(0,255,255,0.10)] to-transparent blur-sm" />
+        {/* Vignette */}
+        <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,transparent_0%,rgba(0,0,0,0.35)_55%,rgba(0,0,0,0.65)_100%)]" />
+      </div>
+      <div className="sticky top-0 z-50 border-b border-cyan-500/20 bg-[#0a0a0f]/85 backdrop-blur">
         <div className="relative overflow-hidden">
-          <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-emerald-500/10 via-teal-500/10 to-cyan-500/10" />
-          <div className="flex items-center gap-3 px-4 py-2 text-[11px] text-slate-300 sm:px-6">
-            <span className="inline-flex items-center gap-2 rounded-full bg-slate-900/60 px-3 py-1 ring-1 ring-slate-700/70">
+          <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-[rgba(0,255,255,0.12)] via-transparent to-[rgba(0,255,136,0.10)]" />
+          <div className="flex items-center gap-3 px-4 py-3 text-[11px] text-slate-200 sm:px-6">
+            <span className="inline-flex items-center gap-2 rounded-full bg-black/30 px-3 py-1 ring-1 ring-cyan-500/20 neon-border font-terminal">
               <span
                 className={[
                   "h-1.5 w-1.5 rounded-full",
@@ -271,63 +402,67 @@ export default function Home() {
                     : "bg-slate-400 shadow-[0_0_10px_rgba(148,163,184,0.6)]",
                 ].join(" ")}
               />
-              <span className="font-semibold text-slate-100">
+              <span className="ticker-glow font-semibold text-slate-100">
                 {isConnected ? "LIVE" : "SYNCING"}
               </span>
             </span>
             <div className="min-w-0 flex-1 overflow-hidden">
-              <div className="somnia-marquee flex w-[200%] items-center gap-10 whitespace-nowrap">
+              <div className="somnia-marquee flex w-[200%] items-center gap-10 whitespace-nowrap font-terminal">
                 <div className="flex w-1/2 items-center gap-10">
-                  <span className="text-slate-400">Somnia Testnet</span>
+                  <span className="ticker-glow text-slate-300">
+                    SOMNIA • TESTNET
+                  </span>
                   <span>
                     Total detected:{" "}
-                    <span className="font-semibold text-slate-100">
+                    <span className="ticker-glow font-semibold text-slate-100">
                       {stats.totalTxs}
                     </span>
                   </span>
                   <span>
                     Total volume:{" "}
-                    <span className="font-semibold text-emerald-200">
+                    <span className="ticker-glow font-semibold text-[color:var(--neon)]">
                       {stats.totalVolumeFormatted}
                     </span>
                   </span>
                   <span>
                     Largest tx:{" "}
-                    <span className="font-semibold text-teal-200">
+                    <span className="ticker-glow font-semibold text-[color:var(--cyan)]">
                       {stats.largestFormatted}
                     </span>
                   </span>
                   <span className="text-slate-500">
-                    Threshold: {WHALE_THRESHOLD_LABEL}
+                    Filter: {MIN_VALUE_LABEL}
                   </span>
                 </div>
                 <div className="flex w-1/2 items-center gap-10">
-                  <span className="text-slate-400">Somnia Testnet</span>
+                  <span className="ticker-glow text-slate-300">
+                    SOMNIA • TESTNET
+                  </span>
                   <span>
                     Total detected:{" "}
-                    <span className="font-semibold text-slate-100">
+                    <span className="ticker-glow font-semibold text-slate-100">
                       {stats.totalTxs}
                     </span>
                   </span>
                   <span>
                     Total volume:{" "}
-                    <span className="font-semibold text-emerald-200">
+                    <span className="ticker-glow font-semibold text-[color:var(--neon)]">
                       {stats.totalVolumeFormatted}
                     </span>
                   </span>
                   <span>
                     Largest tx:{" "}
-                    <span className="font-semibold text-teal-200">
+                    <span className="ticker-glow font-semibold text-[color:var(--cyan)]">
                       {stats.largestFormatted}
                     </span>
                   </span>
                   <span className="text-slate-500">
-                    Threshold: {WHALE_THRESHOLD_LABEL}
+                    Filter: {MIN_VALUE_LABEL}
                   </span>
                 </div>
               </div>
             </div>
-            <div className="hidden shrink-0 text-[11px] text-slate-400 sm:block">
+            <div className="ticker-glow hidden shrink-0 text-[11px] text-slate-300 sm:block font-terminal">
               Last updated:{" "}
               <span className="font-semibold text-slate-200">
                 {lastUpdatedAt ? lastUpdatedAt.toLocaleTimeString() : "—"}
@@ -338,54 +473,54 @@ export default function Home() {
       </div>
 
       <main className="mx-auto flex min-h-screen max-w-6xl flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8">
-        <header className="relative overflow-hidden rounded-3xl border border-slate-800/70 bg-slate-950/50 px-5 py-6 shadow-[0_18px_80px_rgba(15,23,42,0.85)] sm:px-8 sm:py-7">
+        <header className="neon-border relative overflow-hidden rounded-2xl border bg-black/25 px-5 py-6 shadow-[0_18px_90px_rgba(0,255,255,0.08)] sm:px-8 sm:py-7">
           <div className="pointer-events-none absolute inset-0">
             <div className="somnia-hero-bg absolute -inset-24 opacity-60 blur-3xl">
-              <div className="h-full w-full bg-[radial-gradient(circle_at_20%_20%,rgba(16,185,129,0.30),transparent_50%),radial-gradient(circle_at_80%_30%,rgba(45,212,191,0.22),transparent_48%),radial-gradient(circle_at_50%_80%,rgba(34,211,238,0.16),transparent_52%)]" />
+              <div className="h-full w-full bg-[radial-gradient(circle_at_18%_20%,rgba(0,255,255,0.28),transparent_54%),radial-gradient(circle_at_80%_26%,rgba(0,255,136,0.18),transparent_52%),radial-gradient(circle_at_45%_85%,rgba(0,255,255,0.12),transparent_54%)]" />
             </div>
-            <div className="absolute inset-0 bg-gradient-to-b from-slate-950/20 via-slate-950/60 to-slate-950/90" />
+            <div className="absolute inset-0 bg-gradient-to-b from-black/10 via-black/50 to-black/80" />
           </div>
 
           <div className="relative flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div className="space-y-2">
-              <div className="inline-flex items-center gap-2 rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-300 ring-1 ring-emerald-500/40">
-                <span className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_12px_rgba(16,185,129,0.9)]" />
-                Somnia Whale Tracker
+              <div className="font-terminal inline-flex items-center gap-2 rounded-full bg-black/30 px-3 py-1 text-xs font-semibold text-[color:var(--cyan)] ring-1 ring-cyan-500/25">
+                <span className="h-2 w-2 rounded-full bg-[color:var(--cyan)] shadow-[0_0_14px_rgba(0,255,255,0.85)]" />
+                SOMNIA WHALE TRACKER
               </div>
               <h1 className="text-2xl font-semibold tracking-tight text-slate-50 sm:text-3xl">
-                Trading-style transaction feed
+                Premium Trading Terminal
               </h1>
               <p className="max-w-2xl text-sm text-slate-400">
-                A dense, terminal-style stream of detected transfers on Somnia
-                Testnet. Threshold:{" "}
-                <span className="font-semibold text-teal-300">
-                  {WHALE_THRESHOLD_LABEL}
+                A serious, cyberpunk-grade terminal feed for Somnia Testnet.
+                Filter:{" "}
+                <span className="font-terminal font-semibold text-[color:var(--neon)]">
+                  {MIN_VALUE_LABEL}
                 </span>
                 .
               </p>
             </div>
 
             <div className="flex flex-col items-end gap-3 text-sm">
-              <div className="inline-flex items-center gap-2 rounded-full bg-slate-900/60 px-3 py-1 ring-1 ring-slate-700/80">
+              <div className="font-terminal inline-flex items-center gap-2 rounded-full bg-black/30 px-3 py-1 ring-1 ring-cyan-500/20 neon-border">
                 <span
                   className={[
-                    "h-2 w-2 rounded-full bg-emerald-400",
+                    "h-2 w-2 rounded-full bg-[color:var(--neon)]",
                     isConnected
-                      ? "animate-pulse shadow-[0_0_18px_rgba(16,185,129,1)]"
-                      : "shadow-[0_0_10px_rgba(16,185,129,0.6)]",
+                      ? "shadow-[0_0_22px_rgba(0,255,136,1),0_0_44px_rgba(0,255,255,0.18)] [animation:neon-pulse_1.3s_ease-in-out_infinite]"
+                      : "shadow-[0_0_12px_rgba(0,255,136,0.5)]",
                   ].join(" ")}
                 />
-                <span className="font-medium text-slate-100">
-                  {isConnected ? "Live" : "Connecting..."}
+                <span className="ticker-glow font-semibold text-slate-100">
+                  {isConnected ? "LIVE" : "SYNCING"}
                 </span>
               </div>
-              <div className="inline-flex items-center gap-2 rounded-full bg-slate-900/60 px-3 py-1 text-xs text-slate-400 ring-1 ring-slate-800">
-                <span className="h-1.5 w-1.5 rounded-full bg-teal-400" />
-                Somnia Testnet • RPC `dream-rpc.somnia.network`
+              <div className="font-terminal inline-flex items-center gap-2 rounded-full bg-black/30 px-3 py-1 text-xs text-slate-300 ring-1 ring-cyan-500/15">
+                <span className="h-1.5 w-1.5 rounded-full bg-[color:var(--cyan)] shadow-[0_0_12px_rgba(0,255,255,0.75)]" />
+                SOMNIA TESTNET • RPC PROXIED
               </div>
-              <div className="text-xs text-slate-500">
+              <div className="font-terminal text-xs text-slate-400">
                 Last updated:{" "}
-                <span className="font-semibold text-slate-200">
+                <span className="ticker-glow font-semibold text-slate-100">
                   {lastUpdatedAt ? lastUpdatedAt.toLocaleString() : "—"}
                 </span>
               </div>
@@ -395,27 +530,27 @@ export default function Home() {
 
         <section className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex flex-wrap gap-2">
-            <div className="rounded-xl border border-teal-500/20 bg-slate-950/70 px-3 py-2 shadow-[0_0_0_1px_rgba(45,212,191,0.06),0_12px_40px_rgba(15,23,42,0.65),0_0_18px_rgba(45,212,191,0.10)]">
-              <div className="text-[10px] font-medium uppercase tracking-[0.16em] text-slate-500">
+            <div className="neon-border rounded-xl border bg-black/25 px-3 py-2 font-terminal">
+              <div className="text-[10px] font-medium uppercase tracking-[0.18em] text-slate-500">
                 Total
               </div>
-              <div className="text-sm font-semibold text-slate-100">
+              <div className="ticker-glow text-sm font-semibold text-slate-100">
                 {stats.totalTxs}
               </div>
             </div>
-            <div className="rounded-xl border border-teal-500/20 bg-slate-950/70 px-3 py-2 shadow-[0_0_0_1px_rgba(45,212,191,0.06),0_12px_40px_rgba(15,23,42,0.65),0_0_18px_rgba(45,212,191,0.10)]">
-              <div className="text-[10px] font-medium uppercase tracking-[0.16em] text-slate-500">
+            <div className="neon-border rounded-xl border bg-black/25 px-3 py-2 font-terminal">
+              <div className="text-[10px] font-medium uppercase tracking-[0.18em] text-slate-500">
                 Largest
               </div>
-              <div className="text-sm font-semibold text-teal-200">
+              <div className="ticker-glow text-sm font-semibold text-[color:var(--cyan)]">
                 {stats.largestFormatted}
               </div>
             </div>
-            <div className="rounded-xl border border-teal-500/20 bg-slate-950/70 px-3 py-2 shadow-[0_0_0_1px_rgba(45,212,191,0.06),0_12px_40px_rgba(15,23,42,0.65),0_0_18px_rgba(45,212,191,0.10)]">
-              <div className="text-[10px] font-medium uppercase tracking-[0.16em] text-slate-500">
+            <div className="neon-border rounded-xl border bg-black/25 px-3 py-2 font-terminal">
+              <div className="text-[10px] font-medium uppercase tracking-[0.18em] text-slate-500">
                 Volume
               </div>
-              <div className="text-sm font-semibold text-emerald-200">
+              <div className="ticker-glow text-sm font-semibold text-[color:var(--neon)]">
                 {stats.totalVolumeFormatted}
               </div>
             </div>
@@ -431,8 +566,8 @@ export default function Home() {
 
         <section className="flex flex-1 flex-col gap-4">
           <div className="flex items-center justify-between gap-4">
-            <div className="flex items-center gap-3 text-sm text-slate-400">
-              <span className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-slate-900/70 text-xs font-semibold text-teal-300 ring-1 ring-slate-700">
+            <div className="flex items-center gap-3 text-sm text-slate-300 font-terminal">
+              <span className="neon-border inline-flex h-8 w-8 items-center justify-center rounded-full border bg-black/25 text-xs font-semibold text-[color:var(--cyan)]">
                 {filteredEvents.length}
               </span>
               <span>
@@ -442,7 +577,7 @@ export default function Home() {
             <button
               type="button"
               onClick={clearFeed}
-              className="inline-flex items-center justify-center rounded-full border border-slate-700/80 bg-slate-950/40 px-4 py-2 text-xs font-semibold text-slate-200 transition hover:border-teal-500/70 hover:text-teal-200 hover:bg-slate-900/40 focus:outline-none focus:ring-2 focus:ring-teal-500/60 focus:ring-offset-2 focus:ring-offset-slate-950 disabled:cursor-not-allowed disabled:opacity-50"
+              className="font-terminal inline-flex items-center justify-center rounded-full border border-cyan-500/25 bg-black/30 px-4 py-2 text-xs font-semibold text-slate-100 transition hover:border-cyan-400/60 hover:text-[color:var(--cyan)] hover:shadow-[0_0_22px_rgba(0,255,255,0.18)] focus:outline-none focus:ring-2 focus:ring-cyan-400/60 focus:ring-offset-2 focus:ring-offset-[#0a0a0f] disabled:cursor-not-allowed disabled:opacity-50"
               disabled={events.length === 0}
               aria-disabled={events.length === 0}
             >
@@ -456,7 +591,7 @@ export default function Home() {
                 value={walletFilter}
                 onChange={(e) => setWalletFilter(e.target.value)}
                 placeholder="Filter by wallet address (e.g. 0xabc...)"
-                className="w-full rounded-xl border border-slate-800/80 bg-slate-950/60 px-4 py-3 text-sm text-slate-100 placeholder:text-slate-500 shadow-[0_12px_40px_rgba(15,23,42,0.55)] outline-none transition focus:border-teal-500/70 focus:ring-2 focus:ring-teal-500/40"
+                className="font-terminal w-full rounded-xl border border-cyan-500/20 bg-black/30 px-4 py-3 text-sm text-slate-100 placeholder:text-slate-500 shadow-[0_12px_40px_rgba(0,255,255,0.06)] outline-none transition focus:border-cyan-400/60 focus:ring-2 focus:ring-cyan-400/30"
                 spellCheck={false}
                 autoCapitalize="none"
                 autoCorrect="off"
@@ -466,30 +601,30 @@ export default function Home() {
                 <button
                   type="button"
                   onClick={() => setWalletFilter("")}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 rounded-lg px-2 py-1 text-xs font-semibold text-slate-400 transition hover:bg-slate-900/60 hover:text-teal-200 focus:outline-none focus:ring-2 focus:ring-teal-500/50"
+                  className="font-terminal absolute right-2 top-1/2 -translate-y-1/2 rounded-lg px-2 py-1 text-xs font-semibold text-slate-400 transition hover:bg-white/5 hover:text-[color:var(--cyan)] focus:outline-none focus:ring-2 focus:ring-cyan-400/40"
                   aria-label="Clear wallet filter"
                 >
                   Clear
                 </button>
               )}
             </div>
-            <div className="text-xs text-slate-500 sm:text-right">
+            <div className="font-terminal text-xs text-slate-400 sm:text-right">
               Showing{" "}
-              <span className="font-semibold text-slate-200">
+              <span className="ticker-glow font-semibold text-slate-100">
                 {filteredEvents.length}
               </span>{" "}
               of{" "}
-              <span className="font-semibold text-slate-200">
+              <span className="ticker-glow font-semibold text-slate-100">
                 {events.length}
               </span>
             </div>
           </div>
 
-          <div className="relative flex-1 overflow-hidden rounded-2xl border border-slate-800/80 bg-gradient-to-b from-slate-950/80 via-slate-950/90 to-slate-950/80 shadow-[0_18px_60px_rgba(15,23,42,0.9)]">
-            <div className="pointer-events-none absolute inset-x-0 top-0 h-24 bg-gradient-to-b from-emerald-500/15 via-transparent to-transparent blur-2xl" />
+          <div className="neon-border relative flex-1 overflow-hidden rounded-2xl border bg-black/20 shadow-[0_18px_90px_rgba(0,255,255,0.07)]">
+            <div className="pointer-events-none absolute inset-x-0 top-0 h-24 bg-gradient-to-b from-[rgba(0,255,255,0.16)] via-transparent to-transparent blur-2xl" />
 
             <div className="relative h-full">
-              <div className="grid grid-cols-[16px_minmax(0,2.6fr)_minmax(0,1.6fr)_minmax(0,3fr)_minmax(0,1.7fr)] gap-3 border-b border-slate-800/80 bg-slate-950/90 px-4 py-2 text-[10px] font-medium uppercase tracking-[0.16em] text-slate-500 sm:px-6">
+              <div className="font-terminal grid grid-cols-[16px_minmax(0,2.6fr)_minmax(0,1.6fr)_minmax(0,3fr)_minmax(0,1.7fr)] gap-3 border-b border-cyan-500/15 bg-black/30 px-4 py-2 text-[10px] font-medium uppercase tracking-[0.18em] text-slate-500 sm:px-6">
                 <div />
                 <div>Wallet</div>
                 <div>Amount</div>
@@ -515,9 +650,9 @@ export default function Home() {
                     {filteredEvents.map((event) => (
                       <li
                         key={`${event.hash}-${event.timestamp}`}
-                        className="somnia-row-enter group rounded-lg border border-slate-800/70 bg-slate-950/70 px-3 py-2 text-[11px] text-slate-200 shadow-[0_10px_40px_rgba(15,23,42,0.65)] transition hover:border-teal-500/80 hover:bg-slate-900/70 sm:px-4"
+                        className="somnia-row-enter group rounded-md border border-cyan-500/10 bg-black/25 px-3 py-1.5 text-[11px] text-slate-200 shadow-[0_10px_40px_rgba(0,0,0,0.55)] transition hover:border-cyan-400/40 hover:bg-black/35 sm:px-4"
                       >
-                        <div className="grid grid-cols-[16px_minmax(0,2.6fr)_minmax(0,1.6fr)_minmax(0,3fr)_minmax(0,1.7fr)] items-center gap-3">
+                        <div className="font-terminal grid grid-cols-[16px_minmax(0,2.6fr)_minmax(0,1.6fr)_minmax(0,3fr)_minmax(0,1.7fr)] items-center gap-3">
                           <span
                             className={[
                               "h-2.5 w-2.5 rounded-full",
@@ -532,7 +667,7 @@ export default function Home() {
                               href={`https://shannon-explorer.somnia.network/address/${event.walletAddress}`}
                               target="_blank"
                               rel="noreferrer noopener"
-                              className="min-w-0 truncate font-mono text-[11px] text-slate-200 underline-offset-2 hover:text-teal-200 hover:underline"
+                              className="min-w-0 truncate text-[11px] text-slate-200 underline-offset-2 transition hover:text-[color:var(--cyan)] hover:underline hover:shadow-[0_0_18px_rgba(0,255,255,0.25)]"
                             >
                               {event.walletAddress}
                             </a>
@@ -550,7 +685,7 @@ export default function Home() {
                               href={`https://shannon-explorer.somnia.network/tx/${event.hash}`}
                               target="_blank"
                               rel="noreferrer noopener"
-                              className="truncate font-mono text-[11px] text-slate-400 underline-offset-2 hover:text-teal-200 hover:underline"
+                              className="truncate text-[11px] text-slate-400 underline-offset-2 transition hover:text-[color:var(--cyan)] hover:underline hover:shadow-[0_0_18px_rgba(0,255,255,0.25)]"
                             >
                               {event.hash}
                             </a>
