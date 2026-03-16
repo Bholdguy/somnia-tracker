@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Address,
   Hex,
@@ -48,6 +48,8 @@ export default function Home() {
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [events, setEvents] = useState<WhaleTransaction[]>([]);
+  const [walletFilter, setWalletFilter] = useState("");
+  const seenTxsRef = useRef<Set<Hex>>(new Set());
 
   const stats = useMemo(() => {
     if (events.length === 0) {
@@ -84,9 +86,21 @@ export default function Home() {
     []
   );
 
+  const clearFeed = useCallback(() => {
+    seenTxsRef.current = new Set();
+    setEvents([]);
+  }, []);
+
+  const normalizedWalletFilter = walletFilter.trim().toLowerCase();
+  const filteredEvents = useMemo(() => {
+    if (!normalizedWalletFilter) return events;
+    return events.filter((e) =>
+      e.walletAddress.toLowerCase().includes(normalizedWalletFilter)
+    );
+  }, [events, normalizedWalletFilter]);
+
   useEffect(() => {
     let isCancelled = false;
-    const seenTxs = new Set<Hex>();
 
     const poll = async () => {
       if (isCancelled) return;
@@ -108,8 +122,8 @@ export default function Home() {
 
         for (const tx of block.transactions) {
           const hash = tx.hash as Hex;
-          if (seenTxs.has(hash)) continue;
-          seenTxs.add(hash);
+          if (seenTxsRef.current.has(hash)) continue;
+          seenTxsRef.current.add(hash);
 
           const value = (tx as any).value ?? 0n;
           const isWhale = value >= WHALE_THRESHOLD_WEI;
@@ -162,9 +176,53 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 antialiased">
+      <style jsx global>{`
+        @keyframes somnia-hero-gradient {
+          0% {
+            transform: translate3d(-10%, -10%, 0) scale(1);
+            filter: hue-rotate(0deg);
+          }
+          50% {
+            transform: translate3d(10%, 10%, 0) scale(1.06);
+            filter: hue-rotate(12deg);
+          }
+          100% {
+            transform: translate3d(-10%, -10%, 0) scale(1);
+            filter: hue-rotate(0deg);
+          }
+        }
+
+        @keyframes somnia-fade-in-up {
+          from {
+            opacity: 0;
+            transform: translate3d(0, 10px, 0);
+          }
+          to {
+            opacity: 1;
+            transform: translate3d(0, 0, 0);
+          }
+        }
+
+        .somnia-hero-bg {
+          animation: somnia-hero-gradient 14s ease-in-out infinite;
+          will-change: transform, filter;
+        }
+
+        .somnia-row-enter {
+          animation: somnia-fade-in-up 420ms ease-out both;
+        }
+      `}</style>
       <main className="mx-auto flex min-h-screen max-w-6xl flex-col gap-8 px-4 py-10 sm:px-6 lg:px-8">
-        <header className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="space-y-2">
+        <header className="relative overflow-hidden rounded-3xl border border-slate-800/70 bg-slate-950/50 px-5 py-6 shadow-[0_18px_80px_rgba(15,23,42,0.85)] sm:px-8 sm:py-7">
+          <div className="pointer-events-none absolute inset-0">
+            <div className="somnia-hero-bg absolute -inset-24 opacity-60 blur-3xl">
+              <div className="h-full w-full bg-[radial-gradient(circle_at_20%_20%,rgba(16,185,129,0.30),transparent_50%),radial-gradient(circle_at_80%_30%,rgba(45,212,191,0.22),transparent_48%),radial-gradient(circle_at_50%_80%,rgba(34,211,238,0.16),transparent_52%)]" />
+            </div>
+            <div className="absolute inset-0 bg-gradient-to-b from-slate-950/20 via-slate-950/60 to-slate-950/90" />
+          </div>
+
+          <div className="relative flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="space-y-2">
             <div className="inline-flex items-center gap-2 rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-300 ring-1 ring-emerald-500/40">
               <span className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_12px_rgba(16,185,129,0.9)]" />
               Somnia Whale Tracker
@@ -184,7 +242,14 @@ export default function Home() {
 
           <div className="flex flex-col items-end gap-3 text-sm">
             <div className="inline-flex items-center gap-2 rounded-full bg-slate-900/60 px-3 py-1 ring-1 ring-slate-700/80">
-              <span className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_10px_rgba(16,185,129,0.9)]" />
+              <span
+                className={[
+                  "h-2 w-2 rounded-full bg-emerald-400",
+                  isConnected
+                    ? "animate-pulse shadow-[0_0_18px_rgba(16,185,129,1)]"
+                    : "shadow-[0_0_10px_rgba(16,185,129,0.6)]",
+                ].join(" ")}
+              />
               <span className="font-medium text-slate-100">
                 {isConnected ? "Live" : "Connecting..."}
               </span>
@@ -193,11 +258,12 @@ export default function Home() {
               <span className="h-1.5 w-1.5 rounded-full bg-teal-400" />
               Somnia Testnet • RPC `dream-rpc.somnia.network`
             </div>
+            </div>
           </div>
         </header>
 
-        <section className="grid gap-4 rounded-2xl border border-slate-800/80 bg-slate-950/80 p-4 sm:grid-cols-3 sm:p-5">
-          <div className="space-y-1">
+        <section className="grid gap-4 sm:grid-cols-3">
+          <div className="space-y-1 rounded-2xl border border-teal-500/20 bg-slate-950/70 p-4 shadow-[0_0_0_1px_rgba(45,212,191,0.08),0_18px_60px_rgba(15,23,42,0.75),0_0_28px_rgba(45,212,191,0.10)] sm:p-5">
             <p className="text-xs font-medium uppercase tracking-[0.14em] text-slate-400">
               Total Whales Detected
             </p>
@@ -205,7 +271,7 @@ export default function Home() {
               {stats.totalWhales}
             </p>
           </div>
-          <div className="space-y-1">
+          <div className="space-y-1 rounded-2xl border border-teal-500/20 bg-slate-950/70 p-4 shadow-[0_0_0_1px_rgba(45,212,191,0.08),0_18px_60px_rgba(15,23,42,0.75),0_0_28px_rgba(45,212,191,0.10)] sm:p-5">
             <p className="text-xs font-medium uppercase tracking-[0.14em] text-slate-400">
               Largest Transaction
             </p>
@@ -213,7 +279,7 @@ export default function Home() {
               {stats.largestFormatted}
             </p>
           </div>
-          <div className="space-y-1">
+          <div className="space-y-1 rounded-2xl border border-teal-500/20 bg-slate-950/70 p-4 shadow-[0_0_0_1px_rgba(45,212,191,0.08),0_18px_60px_rgba(15,23,42,0.75),0_0_28px_rgba(45,212,191,0.10)] sm:p-5">
             <p className="text-xs font-medium uppercase tracking-[0.14em] text-slate-400">
               Total Volume
             </p>
@@ -234,11 +300,55 @@ export default function Home() {
           <div className="flex items-center justify-between gap-4">
             <div className="flex items-center gap-3 text-sm text-slate-400">
               <span className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-slate-900/70 text-xs font-semibold text-teal-300 ring-1 ring-slate-700">
-                {events.length}
+                {filteredEvents.length}
               </span>
               <span>
                 Whale transactions detected in this session. Newest appears at
                 the top.
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={clearFeed}
+              className="inline-flex items-center justify-center rounded-full border border-slate-700/80 bg-slate-950/40 px-4 py-2 text-xs font-semibold text-slate-200 transition hover:border-teal-500/70 hover:text-teal-200 hover:bg-slate-900/40 focus:outline-none focus:ring-2 focus:ring-teal-500/60 focus:ring-offset-2 focus:ring-offset-slate-950 disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={events.length === 0}
+              aria-disabled={events.length === 0}
+            >
+              Clear Feed
+            </button>
+          </div>
+
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="relative w-full sm:max-w-xl">
+              <input
+                value={walletFilter}
+                onChange={(e) => setWalletFilter(e.target.value)}
+                placeholder="Filter by wallet address (e.g. 0xabc...)"
+                className="w-full rounded-xl border border-slate-800/80 bg-slate-950/60 px-4 py-3 text-sm text-slate-100 placeholder:text-slate-500 shadow-[0_12px_40px_rgba(15,23,42,0.55)] outline-none transition focus:border-teal-500/70 focus:ring-2 focus:ring-teal-500/40"
+                spellCheck={false}
+                autoCapitalize="none"
+                autoCorrect="off"
+                inputMode="text"
+              />
+              {walletFilter.trim().length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setWalletFilter("")}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 rounded-lg px-2 py-1 text-xs font-semibold text-slate-400 transition hover:bg-slate-900/60 hover:text-teal-200 focus:outline-none focus:ring-2 focus:ring-teal-500/50"
+                  aria-label="Clear wallet filter"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+            <div className="text-xs text-slate-500 sm:text-right">
+              Showing{" "}
+              <span className="font-semibold text-slate-200">
+                {filteredEvents.length}
+              </span>{" "}
+              of{" "}
+              <span className="font-semibold text-slate-200">
+                {events.length}
               </span>
             </div>
           </div>
@@ -255,9 +365,13 @@ export default function Home() {
               </div>
 
               <div className="h-[480px] overflow-y-auto px-2 py-2 sm:px-4">
-                {events.length === 0 ? (
+                {filteredEvents.length === 0 ? (
                   <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-sm text-slate-500">
-                    <p>No whale transactions detected yet.</p>
+                    <p>
+                      {events.length === 0
+                        ? "No whale transactions detected yet."
+                        : "No matches for the current filter."}
+                    </p>
                     <p className="text-xs text-slate-500">
                       Keep this page open to watch the live feed as whales move
                       on Somnia Testnet.
@@ -265,20 +379,23 @@ export default function Home() {
                   </div>
                 ) : (
                   <ul className="space-y-1">
-                    {events.map((event) => (
+                    {filteredEvents.map((event) => (
                       <li
                         key={`${event.hash}-${event.timestamp}`}
-                        className="group rounded-xl border border-slate-800/70 bg-slate-950/80 px-3 py-3 text-xs text-slate-200 shadow-[0_10px_40px_rgba(15,23,42,0.7)] transition hover:border-teal-500/80 hover:bg-slate-900/80 sm:px-4 sm:text-sm"
+                        className="somnia-row-enter group rounded-xl border border-slate-800/70 bg-slate-950/80 px-3 py-3 text-xs text-slate-200 shadow-[0_10px_40px_rgba(15,23,42,0.7)] transition hover:border-teal-500/80 hover:bg-slate-900/80 sm:px-4 sm:text-sm"
                       >
                         <div className="grid grid-cols-[minmax(0,3fr)_minmax(0,2fr)_minmax(0,3fr)_minmax(0,2fr)] items-center gap-3">
-                          <a
-                            href={`https://shannon-explorer.somnia.network/address/${event.walletAddress}`}
-                            target="_blank"
-                            rel="noreferrer noopener"
-                            className="truncate font-mono text-[11px] text-slate-300 underline-offset-2 hover:text-teal-300 hover:underline sm:text-xs"
-                          >
-                            {event.walletAddress}
-                          </a>
+                          <div className="flex min-w-0 items-center gap-2">
+                            <span className="text-base leading-none">🐋</span>
+                            <a
+                              href={`https://shannon-explorer.somnia.network/address/${event.walletAddress}`}
+                              target="_blank"
+                              rel="noreferrer noopener"
+                              className="min-w-0 truncate font-mono text-[11px] text-slate-300 underline-offset-2 hover:text-teal-300 hover:underline sm:text-xs"
+                            >
+                              {event.walletAddress}
+                            </a>
+                          </div>
                           <div className="font-semibold text-emerald-300">
                             {event.amountFormatted}
                           </div>
