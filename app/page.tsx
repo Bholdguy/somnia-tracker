@@ -121,9 +121,11 @@ export default function Home() {
   const normalizedWalletFilter = walletFilter.trim().toLowerCase();
   const filteredEvents = useMemo(() => {
     if (!normalizedWalletFilter) return events;
-    return events.filter((e) =>
-      e.walletAddress.toLowerCase().includes(normalizedWalletFilter)
-    );
+    const query = normalizedWalletFilter.replace(/\s+/g, "");
+    return events.filter((e) => {
+      const addr = (e.walletAddress ?? "").toLowerCase().replace(/\s+/g, "");
+      return addr.includes(query);
+    });
   }, [events, normalizedWalletFilter]);
 
   useEffect(() => {
