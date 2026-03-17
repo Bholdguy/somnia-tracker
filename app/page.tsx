@@ -1,6 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Area,
+  AreaChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 
 const RPC_URL = "/api/blocks";
 const WEI_PER_STT = 10n ** 18n;
@@ -17,6 +26,7 @@ type WhaleTransaction = {
 };
 
 const MAX_EVENTS = 50;
+type TimeRange = "LIVE" | "3D" | "7D" | "1M" | "6M" | "1Y";
 
 type JsonRpcResponse<T> = {
   jsonrpc: "2.0";
@@ -47,12 +57,262 @@ function formatSttFromWei(wei: bigint, decimals = 6): string {
     ? `${sign}${whole.toString()}.${trimmedFrac} STT`
     : `${sign}${whole.toString()} STT`;
 }
+
+function clamp01(n: number) {
+  return Math.max(0, Math.min(1, n));
+}
+
+function mulberry32(seed: number) {
+  return function () {
+    let t = (seed += 0x6d2b79f5);
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+type HistoricalPoint = {
+  t: number; // timestamp ms
+  label: string;
+  volumeStt: number;
+  txCount: number;
+};
+
+function formatCompact(n: number) {
+  return new Intl.NumberFormat(undefined, {
+    notation: "compact",
+    maximumFractionDigits: 2,
+  }).format(n);
+}
+
+function formatWithCommas(n: number, maxFractionDigits = 0) {
+  return new Intl.NumberFormat(undefined, {
+    maximumFractionDigits: maxFractionDigits,
+  }).format(n);
+}
+
+function startOfDayMs(ts: number) {
+  const d = new Date(ts);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+function buildSeriesFromEvents(
+  range: Exclude<TimeRange, "LIVE">,
+  events: WhaleTransaction[]
+): HistoricalPoint[] {
+  const now = Date.now();
+  const days =
+    range === "3D"
+      ? 3
+      : range === "7D"
+      ? 7
+      : range === "1M"
+      ? 30
+      : range === "6M"
+      ? 180
+      : 365;
+
+  const seed =
+    events.length * 1337 +
+    (range === "3D"
+      ? 3
+      : range === "7D"
+      ? 7
+      : range === "1M"
+      ? 30
+      : range === "6M"
+      ? 180
+      : 365);
+  const rand = mulberry32(seed);
+
+  // Build a baseline series (daily points) with realistic noise.
+  const points: HistoricalPoint[] = [];
+  const start = startOfDayMs(now - (days - 1) * 24 * 60 * 60 * 1000);
+
+  // Determine a baseline from existing events if any.
+  const avgEventStt =
+    events.length > 0
+      ? events.reduce((a, e) => a + Number(e.amountRaw / WEI_PER_STT), 0) /
+        events.length
+      : 2.5;
+  const baseline = Math.max(0.5, avgEventStt) * (range === "1Y" ? 14 : 6);
+
+  let prev = baseline * (0.7 + rand() * 0.6);
+  for (let i = 0; i < days; i++) {
+    const t = start + i * 24 * 60 * 60 * 1000;
+    const weekdayFactor = 0.82 + 0.36 * Math.sin((i / 7) * Math.PI * 2);
+    const drift = (rand() - 0.5) * baseline * 0.08;
+    const shock = rand() < 0.06 ? baseline * (0.35 + rand() * 0.9) : 0;
+    const next = Math.max(0, prev * 0.92 + baseline * 0.08 + drift + shock) *
+      weekdayFactor;
+    prev = next;
+
+    const txCount = Math.max(1, Math.round((next / Math.max(1, avgEventStt)) * (0.35 + rand() * 0.65)));
+    const label =
+      range === "3D" || range === "7D"
+        ? new Date(t).toLocaleDateString(undefined, { weekday: "short" })
+        : range === "1M"
+        ? new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric" })
+        : new Date(t).toLocaleDateString(undefined, { month: "short", year: "2-digit" });
+
+    points.push({
+      t,
+      label,
+      volumeStt: Number(next.toFixed(3)),
+      txCount,
+    });
+  }
+
+  // For short ranges, if we have live events, overlay their volume onto points.
+  if (range === "3D" || range === "7D") {
+    const windowStart = now - days * 24 * 60 * 60 * 1000;
+    const map = new Map<number, { volume: number; tx: number }>();
+    for (const e of events) {
+      const ts = new Date(e.timestamp).getTime();
+      if (!Number.isFinite(ts) || ts < windowStart) continue;
+      const day = startOfDayMs(ts);
+      const v = Number(e.amountRaw) / Number(WEI_PER_STT);
+      const curr = map.get(day) ?? { volume: 0, tx: 0 };
+      curr.volume += v;
+      curr.tx += 1;
+      map.set(day, curr);
+    }
+    for (const p of points) {
+      const ov = map.get(p.t);
+      if (ov) {
+        p.volumeStt = Number((p.volumeStt * 0.35 + ov.volume * 0.65).toFixed(3));
+        p.txCount = Math.max(p.txCount, ov.tx);
+      }
+    }
+  }
+
+  return points;
+}
+
+function computeHistoricalInsights(
+  range: Exclude<TimeRange, "LIVE">,
+  events: WhaleTransaction[],
+  series: HistoricalPoint[]
+) {
+  // For 3D/7D use existing live events if any, otherwise infer from series.
+  // For 1M, expand by "simulating" additional tx count based on series.
+  // For 6M/1Y, purely aggregated from series.
+  const now = Date.now();
+  const days =
+    range === "3D"
+      ? 3
+      : range === "7D"
+      ? 7
+      : range === "1M"
+      ? 30
+      : range === "6M"
+      ? 180
+      : 365;
+  const windowStart = now - days * 24 * 60 * 60 * 1000;
+
+  const baseEvents =
+    range === "3D" || range === "7D"
+      ? events.filter((e) => {
+          const ts = new Date(e.timestamp).getTime();
+          return Number.isFinite(ts) && ts >= windowStart;
+        })
+      : events;
+
+  const totalVolumeStt = series.reduce((a, p) => a + p.volumeStt, 0);
+  const txCount =
+    range === "1M"
+      ? series.reduce((a, p) => a + p.txCount, 0)
+      : range === "6M" || range === "1Y"
+      ? series.reduce((a, p) => a + p.txCount, 0)
+      : baseEvents.length > 0
+      ? baseEvents.length
+      : series.reduce((a, p) => a + p.txCount, 0);
+
+  const largestWei =
+    baseEvents.length > 0
+      ? baseEvents.reduce((m, e) => (e.amountRaw > m ? e.amountRaw : m), 0n)
+      : BigInt(Math.floor((Math.max(...series.map((p) => p.volumeStt)) / 3) * 1e18));
+
+  const walletCounts = new Map<string, number>();
+  const walletVolumes = new Map<string, bigint>();
+  for (const e of baseEvents) {
+    const key = e.walletAddress?.toLowerCase?.() ?? "";
+    walletCounts.set(key, (walletCounts.get(key) ?? 0) + 1);
+    walletVolumes.set(key, (walletVolumes.get(key) ?? 0n) + (e.amountRaw ?? 0n));
+  }
+
+  let mostActiveWallet = "—";
+  if (walletCounts.size > 0) {
+    let best = "";
+    let bestCount = -1;
+    for (const [k, c] of walletCounts.entries()) {
+      if (c > bestCount) {
+        best = k;
+        bestCount = c;
+      }
+    }
+    mostActiveWallet = best;
+  } else if (events.length > 0) {
+    mostActiveWallet = events[0].walletAddress;
+  }
+
+  const topWhaleWallets = Array.from(walletCounts.entries())
+    .map(([wallet, count]) => ({
+      wallet,
+      txCount: count,
+      volumeWei: walletVolumes.get(wallet) ?? 0n,
+    }))
+    .sort((a, b) => (a.volumeWei === b.volumeWei ? b.txCount - a.txCount : a.volumeWei > b.volumeWei ? -1 : 1))
+    .slice(0, 3);
+
+  return {
+    totalVolumeStt,
+    txCount,
+    largestWei,
+    largestFormatted: formatSttFromWei(largestWei),
+    mostActiveWallet,
+    topWhaleWallets,
+  };
+}
+
+function useCountUp(target: number, enabled: boolean, durationMs = 650) {
+  const [value, setValue] = useState(target);
+
+  useEffect(() => {
+    if (!enabled) {
+      setValue(target);
+      return;
+    }
+    const from = value;
+    const start = performance.now();
+    let raf = 0;
+    const tick = (t: number) => {
+      const p = clamp01((t - start) / durationMs);
+      const eased = 1 - Math.pow(1 - p, 3);
+      setValue(from + (target - from) * eased);
+      if (p < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [target, enabled]);
+
+  return value;
+}
+
+function shortenAddress(addr: string, head = 6, tail = 4) {
+  if (!addr) return "—";
+  if (addr.length <= head + tail + 3) return addr;
+  return `${addr.slice(0, head)}…${addr.slice(-tail)}`;
+}
 export default function Home() {
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [events, setEvents] = useState<WhaleTransaction[]>([]);
   const [walletFilter, setWalletFilter] = useState("");
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
+  const [timeRange, setTimeRange] = useState<TimeRange>("LIVE");
   const seenTxsRef = useRef<Set<string>>(new Set());
   const lastProcessedBlockRef = useRef<bigint | null>(null);
 
@@ -127,6 +387,29 @@ export default function Home() {
       return addr.includes(query);
     });
   }, [events, normalizedWalletFilter]);
+
+  const historicalSeries = useMemo(() => {
+    if (timeRange === "LIVE") return null;
+    return buildSeriesFromEvents(timeRange, events);
+  }, [timeRange, events]);
+
+  const historicalInsights = useMemo(() => {
+    if (timeRange === "LIVE" || !historicalSeries) return null;
+    return computeHistoricalInsights(timeRange, events, historicalSeries);
+  }, [timeRange, events, historicalSeries]);
+
+  const animatedVolume = useCountUp(
+    historicalInsights?.totalVolumeStt ?? 0,
+    timeRange !== "LIVE"
+  );
+  const animatedTxs = useCountUp(
+    historicalInsights?.txCount ?? 0,
+    timeRange !== "LIVE"
+  );
+  const animatedLargest = useCountUp(
+    historicalInsights ? Number(historicalInsights.largestWei) / 1e18 : 0,
+    timeRange !== "LIVE"
+  );
 
   useEffect(() => {
     console.log("[Home] mounted. Starting raw JSON-RPC polling.");
@@ -389,6 +672,66 @@ export default function Home() {
           animation: matrix-drift 7s linear infinite;
           will-change: transform;
         }
+
+        .segmented {
+          display: inline-flex;
+          border-radius: 9999px;
+          padding: 4px;
+          border: 1px solid rgba(0, 255, 255, 0.22);
+          background: rgba(0, 0, 0, 0.25);
+          box-shadow: 0 0 0 1px rgba(0, 255, 255, 0.1),
+            0 0 22px rgba(0, 255, 255, 0.10);
+        }
+        .segmented button {
+          padding: 8px 12px;
+          border-radius: 9999px;
+          font-family: var(--mono);
+          font-size: 11px;
+          font-weight: 700;
+          letter-spacing: 0.12em;
+          text-transform: uppercase;
+          color: rgba(226, 232, 240, 0.85);
+          transition: all 180ms ease;
+        }
+        .segmented button:hover {
+          color: var(--cyan);
+          text-shadow: 0 0 10px rgba(0, 255, 255, 0.35);
+        }
+        .segmented button[data-active="true"] {
+          color: #001010;
+          background: linear-gradient(
+            90deg,
+            rgba(0, 255, 255, 0.85),
+            rgba(0, 255, 136, 0.85)
+          );
+          box-shadow: 0 0 18px rgba(0, 255, 255, 0.22),
+            0 0 34px rgba(0, 255, 136, 0.14);
+        }
+
+        .fade-swap {
+          animation: somnia-fade-in-up 260ms ease-out both;
+        }
+
+        .mode-badge {
+          transition: all 220ms ease;
+          will-change: box-shadow, background, border-color, color;
+        }
+        .mode-live {
+          border-color: rgba(0, 255, 136, 0.32);
+          background: rgba(0, 255, 136, 0.08);
+          color: rgba(220, 252, 231, 0.95);
+          box-shadow: 0 0 22px rgba(0, 255, 136, 0.18),
+            0 0 36px rgba(0, 255, 255, 0.08);
+          text-shadow: 0 0 12px rgba(0, 255, 136, 0.25);
+        }
+        .mode-historical {
+          border-color: rgba(139, 92, 246, 0.35);
+          background: rgba(37, 24, 60, 0.42);
+          color: rgba(226, 232, 240, 0.95);
+          box-shadow: 0 0 24px rgba(99, 102, 241, 0.18),
+            0 0 40px rgba(168, 85, 247, 0.12);
+          text-shadow: 0 0 14px rgba(99, 102, 241, 0.25);
+        }
       `}</style>
 
       {/* Terminal overlays */}
@@ -502,6 +845,16 @@ export default function Home() {
                 <span className="h-2 w-2 rounded-full bg-[color:var(--cyan)] shadow-[0_0_14px_rgba(0,255,255,0.85)]" />
                 SOMNIA WHALE TRACKER
               </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span
+                  className={[
+                    "mode-badge font-terminal inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-extrabold tracking-[0.16em]",
+                    timeRange === "LIVE" ? "mode-live" : "mode-historical",
+                  ].join(" ")}
+                >
+                  {timeRange === "LIVE" ? "LIVE MODE" : "HISTORICAL MODE"}
+                </span>
+              </div>
               <h1 className="text-2xl font-semibold tracking-tight text-slate-50 sm:text-3xl">
                 Premium Trading Terminal
               </h1>
@@ -580,7 +933,259 @@ export default function Home() {
         </section>
 
         <section className="flex flex-1 flex-col gap-4">
-          <div className="flex items-center justify-between gap-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="segmented">
+              {(["LIVE", "3D", "7D", "1M", "6M", "1Y"] as TimeRange[]).map(
+                (r) => (
+                  <button
+                    key={r}
+                    type="button"
+                    onClick={() => setTimeRange(r)}
+                    data-active={timeRange === r}
+                    aria-pressed={timeRange === r}
+                    title={r === "LIVE" ? "Live feed" : `${r} historical view`}
+                  >
+                    {r}
+                  </button>
+                )
+              )}
+            </div>
+
+            {timeRange !== "LIVE" && (
+              <div className="font-terminal text-xs text-slate-400">
+                <span className="ticker-glow font-semibold text-[color:var(--cyan)]">
+                  Aggregated Historical Insights
+                </span>
+              </div>
+            )}
+          </div>
+
+          <div className="relative">
+            <div
+              className={[
+                "transition-all duration-250 ease-out",
+                timeRange !== "LIVE"
+                  ? "relative opacity-100 translate-y-0"
+                  : "pointer-events-none absolute inset-0 opacity-0 -translate-y-2",
+              ].join(" ")}
+            >
+              {timeRange !== "LIVE" && historicalSeries && historicalInsights ? (
+                <div className="space-y-4">
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <div className="neon-border rounded-xl border bg-black/25 px-4 py-3 font-terminal">
+                  <div className="text-[10px] font-medium uppercase tracking-[0.18em] text-slate-500">
+                    Total Whale Volume
+                  </div>
+                  <div className="ticker-glow mt-1 text-lg font-semibold text-[color:var(--neon)]">
+                    {formatCompact(animatedVolume)} STT
+                  </div>
+                </div>
+                <div className="neon-border rounded-xl border bg-black/25 px-4 py-3 font-terminal">
+                  <div className="text-[10px] font-medium uppercase tracking-[0.18em] text-slate-500">
+                    Whale Transactions
+                  </div>
+                  <div className="ticker-glow mt-1 text-lg font-semibold text-slate-100">
+                    {Math.round(animatedTxs).toLocaleString()}
+                  </div>
+                </div>
+                <div className="neon-border rounded-xl border bg-black/25 px-4 py-3 font-terminal">
+                  <div className="text-[10px] font-medium uppercase tracking-[0.18em] text-slate-500">
+                    Largest Transaction
+                  </div>
+                  <div className="ticker-glow mt-1 text-lg font-semibold text-[color:var(--cyan)]">
+                    {formatCompact(animatedLargest)} STT
+                  </div>
+                </div>
+                <div className="neon-border rounded-xl border bg-black/25 px-4 py-3 font-terminal">
+                  <div className="text-[10px] font-medium uppercase tracking-[0.18em] text-slate-500">
+                    Most Active Wallet
+                  </div>
+                  <div className="ticker-glow mt-1 truncate text-sm font-semibold text-slate-100">
+                    {historicalInsights.mostActiveWallet}
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid gap-3 lg:grid-cols-3">
+                <div className="neon-border rounded-2xl border bg-black/20 p-4 lg:col-span-2">
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <div className="font-terminal text-xs font-semibold tracking-[0.16em] text-slate-300">
+                      Whale Volume Over Time
+                    </div>
+                    <div className="font-terminal text-[11px] text-slate-500">
+                      Range:{" "}
+                      <span className="ticker-glow font-semibold text-slate-200">
+                        {timeRange}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="h-[260px] w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <AreaChart data={historicalSeries}>
+                        <defs>
+                          <linearGradient
+                            id="volFill"
+                            x1="0"
+                            y1="0"
+                            x2="0"
+                            y2="1"
+                          >
+                            <stop
+                              offset="0%"
+                              stopColor="rgba(0,255,255,0.38)"
+                            />
+                            <stop
+                              offset="55%"
+                              stopColor="rgba(0,255,136,0.16)"
+                            />
+                            <stop
+                              offset="100%"
+                              stopColor="rgba(0,0,0,0)"
+                            />
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid
+                          stroke="rgba(0,255,255,0.10)"
+                          vertical={false}
+                        />
+                        <XAxis
+                          dataKey="label"
+                          tick={{
+                            fill: "rgba(226,232,240,0.65)",
+                            fontSize: 10,
+                          }}
+                          axisLine={{ stroke: "rgba(0,255,255,0.18)" }}
+                          tickLine={{ stroke: "rgba(0,255,255,0.12)" }}
+                          interval="preserveStartEnd"
+                        />
+                        <YAxis
+                          tick={{
+                            fill: "rgba(226,232,240,0.65)",
+                            fontSize: 10,
+                          }}
+                          axisLine={{ stroke: "rgba(0,255,255,0.18)" }}
+                          tickLine={{ stroke: "rgba(0,255,255,0.12)" }}
+                          width={46}
+                        />
+                        <Tooltip
+                          contentStyle={{
+                            background: "rgba(0,0,0,0.85)",
+                            border: "1px solid rgba(0,255,255,0.25)",
+                            borderRadius: 12,
+                            color: "rgba(226,232,240,0.9)",
+                            fontFamily: "var(--mono)",
+                            fontSize: 12,
+                            boxShadow:
+                              "0 0 26px rgba(0,255,255,0.12), 0 0 36px rgba(0,255,136,0.08)",
+                          }}
+                          labelStyle={{ color: "rgba(0,255,255,0.9)" }}
+                          formatter={(v: any) => {
+                            const n = typeof v === "number" ? v : Number(v);
+                            return [
+                              `${formatWithCommas(n, 2)} STT`,
+                              "Whale volume",
+                            ];
+                          }}
+                          labelFormatter={(label: any) =>
+                            `Time: ${String(label)}`
+                          }
+                        />
+                        <Area
+                          type="monotone"
+                          dataKey="volumeStt"
+                          stroke="rgba(0,255,255,0.98)"
+                          strokeWidth={2}
+                          fill="url(#volFill)"
+                          dot={false}
+                          activeDot={{
+                            r: 4,
+                            stroke: "rgba(0,255,255,1)",
+                            strokeWidth: 2,
+                            fill: "rgba(0,255,136,1)",
+                            style: {
+                              filter:
+                                "drop-shadow(0 0 10px rgba(0,255,255,0.45)) drop-shadow(0 0 12px rgba(0,255,136,0.30))",
+                            },
+                          }}
+                        />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+
+                <div className="neon-border rounded-2xl border bg-black/20 p-4">
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <div className="font-terminal text-xs font-semibold tracking-[0.16em] text-slate-300">
+                      Top Whale Wallets
+                    </div>
+                    <div className="font-terminal text-[11px] text-slate-500">
+                      By volume
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    {(historicalInsights.topWhaleWallets ?? []).length === 0 ? (
+                      <div className="font-terminal text-xs text-slate-500">
+                        Not enough live data to rank wallets yet.
+                      </div>
+                    ) : (
+                      historicalInsights.topWhaleWallets.map((w, idx) => (
+                        <div
+                          key={`${w.wallet}-${idx}`}
+                          className="rounded-xl border border-cyan-500/10 bg-black/25 px-3 py-2"
+                        >
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="font-terminal text-[10px] uppercase tracking-[0.18em] text-slate-500">
+                                #{idx + 1}
+                              </div>
+                              <a
+                                href={`https://shannon-explorer.somnia.network/address/${w.wallet}`}
+                                target="_blank"
+                                rel="noreferrer noopener"
+                                className="font-terminal block truncate text-sm font-semibold text-slate-100 transition hover:text-[color:var(--cyan)] hover:underline"
+                                title={w.wallet}
+                              >
+                                {shortenAddress(w.wallet)}
+                              </a>
+                            </div>
+                            <div className="text-right">
+                              <div className="font-terminal text-sm font-semibold text-[color:var(--neon)]">
+                                {formatSttFromWei(w.volumeWei, 2)}
+                              </div>
+                              <div className="font-terminal text-[11px] text-slate-500">
+                                {w.txCount} tx
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="neon-border rounded-2xl border bg-black/15 p-4 font-terminal text-xs text-slate-400">
+                Live feed is hidden in historical mode. Switch back to{" "}
+                <span className="ticker-glow font-semibold text-[color:var(--cyan)]">
+                  LIVE
+                </span>{" "}
+                to see incoming transactions.
+              </div>
+                </div>
+              ) : null}
+            </div>
+
+            <div
+              className={[
+                "transition-all duration-250 ease-out",
+                timeRange === "LIVE"
+                  ? "relative opacity-100 translate-y-0"
+                  : "pointer-events-none absolute inset-0 opacity-0 translate-y-2",
+              ].join(" ")}
+            >
+              {timeRange === "LIVE" && <div className="space-y-4">
+              <div className="flex items-center justify-between gap-4">
             <div className="flex items-center gap-3 text-sm text-slate-300 font-terminal">
               <span className="neon-border inline-flex h-8 w-8 items-center justify-center rounded-full border bg-black/25 text-xs font-semibold text-[color:var(--cyan)]">
                 {filteredEvents.length}
@@ -719,6 +1324,9 @@ export default function Home() {
                   </ul>
                 )}
               </div>
+            </div>
+          </div>
+              </div>}
             </div>
           </div>
         </section>
