@@ -237,25 +237,14 @@ function computeHistoricalInsights(
   const walletCounts = new Map<string, number>();
   const walletVolumes = new Map<string, bigint>();
   for (const e of baseEvents) {
-    const key = e.walletAddress?.toLowerCase?.() ?? "";
+    const address = e.walletAddress ?? "";
+    if (!address) continue;
+    const key = address.toLowerCase();
     walletCounts.set(key, (walletCounts.get(key) ?? 0) + 1);
     walletVolumes.set(key, (walletVolumes.get(key) ?? 0n) + (e.amountRaw ?? 0n));
   }
 
-  let mostActiveWallet = "—";
-  if (walletCounts.size > 0) {
-    let best = "";
-    let bestCount = -1;
-    for (const [k, c] of walletCounts.entries()) {
-      if (c > bestCount) {
-        best = k;
-        bestCount = c;
-      }
-    }
-    mostActiveWallet = best;
-  } else if (events.length > 0) {
-    mostActiveWallet = events[0].walletAddress;
-  }
+  const mostActive = getMostActiveWallet(baseEvents);
 
   const topWhaleWallets = Array.from(walletCounts.entries())
     .map(([wallet, count]) => ({
@@ -271,7 +260,9 @@ function computeHistoricalInsights(
     txCount,
     largestWei,
     largestFormatted: formatSttFromWei(largestWei),
-    mostActiveWallet,
+    mostActiveWallet: mostActive?.address ?? "—",
+    mostActiveWalletTxs: mostActive?.txCount ?? 0,
+    mostActiveWalletVolumeWei: mostActive?.totalVolumeWei ?? 0n,
     topWhaleWallets,
   };
 }
@@ -305,6 +296,45 @@ function shortenAddress(addr: string, head = 6, tail = 4) {
   if (!addr) return "—";
   if (addr.length <= head + tail + 3) return addr;
   return `${addr.slice(0, head)}…${addr.slice(-tail)}`;
+}
+
+function getMostActiveWallet(transactions: WhaleTransaction[]) {
+  if (!transactions || transactions.length === 0) return null;
+
+  const byWallet = new Map<
+    string,
+    { address: string; txCount: number; totalVolumeWei: bigint }
+  >();
+
+  for (const tx of transactions) {
+    const address = tx.walletAddress ?? "";
+    if (!address) continue;
+    const key = address.toLowerCase();
+
+    const curr = byWallet.get(key) ?? {
+      address,
+      txCount: 0,
+      totalVolumeWei: 0n,
+    };
+
+    curr.txCount += 1;
+    curr.totalVolumeWei += tx.amountRaw ?? 0n;
+    byWallet.set(key, curr);
+  }
+
+  let best: { address: string; txCount: number; totalVolumeWei: bigint } | null =
+    null;
+  for (const w of byWallet.values()) {
+    if (!best) {
+      best = w;
+      continue;
+    }
+    if (w.txCount > best.txCount) best = w;
+    else if (w.txCount === best.txCount && w.totalVolumeWei > best.totalVolumeWei)
+      best = w;
+  }
+
+  return best;
 }
 export default function Home() {
   const [isConnected, setIsConnected] = useState(false);
@@ -1000,9 +1030,40 @@ export default function Home() {
                   <div className="text-[10px] font-medium uppercase tracking-[0.18em] text-slate-500">
                     Most Active Wallet
                   </div>
-                  <div className="ticker-glow mt-1 truncate text-sm font-semibold text-slate-100">
-                    {historicalInsights.mostActiveWallet}
-                  </div>
+                  {historicalInsights.mostActiveWallet === "—" ? (
+                    <div className="mt-1 text-sm font-semibold text-slate-500">
+                      No activity detected
+                    </div>
+                  ) : (
+                    <div className="mt-1 space-y-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-base leading-none">👑</span>
+                        <a
+                          href={`https://shannon-explorer.somnia.network/address/${historicalInsights.mostActiveWallet}`}
+                          target="_blank"
+                          rel="noreferrer noopener"
+                          className="ticker-glow truncate text-sm font-semibold text-slate-100 transition hover:text-[color:var(--cyan)] hover:underline"
+                          title={historicalInsights.mostActiveWallet}
+                        >
+                          {shortenAddress(historicalInsights.mostActiveWallet)}
+                        </a>
+                      </div>
+                      <div className="flex items-center justify-between gap-3 text-[11px] text-slate-400">
+                        <span>
+                          <span className="font-semibold text-slate-200">
+                            {historicalInsights.mostActiveWalletTxs}
+                          </span>{" "}
+                          txs
+                        </span>
+                        <span className="font-semibold text-[color:var(--neon)]">
+                          {formatSttFromWei(
+                            historicalInsights.mostActiveWalletVolumeWei,
+                            2
+                          )}
+                        </span>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 
