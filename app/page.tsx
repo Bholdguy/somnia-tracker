@@ -20,7 +20,7 @@ const SOMNIA_WS_URL = "wss://dream-rpc.somnia.network/ws";
 
 let reactivityClient: Reactivity | null = null;
 try {
-  reactivityClient = new Reactivity({ url: SOMNIA_WS_URL });
+  reactivityClient = new Reactivity(SOMNIA_WS_URL);
 } catch (e) {
   console.warn("[Reactivity] Could not initialise ReactivityClient:", e);
 }
