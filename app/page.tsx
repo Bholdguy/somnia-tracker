@@ -2,14 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ReactivityClient } from "@somnia-chain/reactivity";
-
-const SOMNIA_WS_URL = "wss://dream-rpc.somnia.network/ws";
-let reactivityClient: ReactivityClient | null = null;
-try {
-  reactivityClient = new ReactivityClient({ url: SOMNIA_WS_URL });
-} catch (e) {
-  console.warn("[Reactivity] Could not initialise ReactivityClient:", e);
-}
 import {
   Area,
   AreaChart,
@@ -19,7 +11,6 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { ReactivityClient } from "@somnia-chain/reactivity";
 
 const RPC_URL = "/api/blocks";
 const WEI_PER_STT = 10n ** 18n;
@@ -27,9 +18,6 @@ const MIN_VALUE_WEI = 1n;
 const MIN_VALUE_LABEL = "> 0 STT";
 const SOMNIA_WS_URL = "wss://dream-rpc.somnia.network/ws";
 
-// Initialise the Somnia Reactivity client (WebSocket-based event listener).
-// The client is created once at module level so it persists across renders.
-// If the WebSocket is unavailable the app gracefully falls back to HTTP polling.
 let reactivityClient: ReactivityClient | null = null;
 try {
   reactivityClient = new ReactivityClient({ url: SOMNIA_WS_URL });
@@ -93,7 +81,7 @@ function mulberry32(seed: number) {
 }
 
 type HistoricalPoint = {
-  t: number; // timestamp ms
+  t: number;
   label: string;
   volumeStt: number;
   txCount: number;
@@ -147,11 +135,9 @@ function buildSeriesFromEvents(
       : 365);
   const rand = mulberry32(seed);
 
-  // Build a baseline series (daily points) with realistic noise.
   const points: HistoricalPoint[] = [];
   const start = startOfDayMs(now - (days - 1) * 24 * 60 * 60 * 1000);
 
-  // Determine a baseline from existing events if any.
   const avgEventStt =
     events.length > 0
       ? events.reduce((a, e) => a + Number(e.amountRaw / WEI_PER_STT), 0) /
@@ -165,17 +151,29 @@ function buildSeriesFromEvents(
     const weekdayFactor = 0.82 + 0.36 * Math.sin((i / 7) * Math.PI * 2);
     const drift = (rand() - 0.5) * baseline * 0.08;
     const shock = rand() < 0.06 ? baseline * (0.35 + rand() * 0.9) : 0;
-    const next = Math.max(0, prev * 0.92 + baseline * 0.08 + drift + shock) *
+    const next =
+      Math.max(0, prev * 0.92 + baseline * 0.08 + drift + shock) *
       weekdayFactor;
     prev = next;
 
-    const txCount = Math.max(1, Math.round((next / Math.max(1, avgEventStt)) * (0.35 + rand() * 0.65)));
+    const txCount = Math.max(
+      1,
+      Math.round(
+        (next / Math.max(1, avgEventStt)) * (0.35 + rand() * 0.65)
+      )
+    );
     const label =
       range === "3D" || range === "7D"
         ? new Date(t).toLocaleDateString(undefined, { weekday: "short" })
         : range === "1M"
-        ? new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric" })
-        : new Date(t).toLocaleDateString(undefined, { month: "short", year: "2-digit" });
+        ? new Date(t).toLocaleDateString(undefined, {
+            month: "short",
+            day: "numeric",
+          })
+        : new Date(t).toLocaleDateString(undefined, {
+            month: "short",
+            year: "2-digit",
+          });
 
     points.push({
       t,
@@ -185,7 +183,6 @@ function buildSeriesFromEvents(
     });
   }
 
-  // For short ranges, if we have live events, overlay their volume onto points.
   if (range === "3D" || range === "7D") {
     const windowStart = now - days * 24 * 60 * 60 * 1000;
     const map = new Map<number, { volume: number; tx: number }>();
@@ -202,7 +199,9 @@ function buildSeriesFromEvents(
     for (const p of points) {
       const ov = map.get(p.t);
       if (ov) {
-        p.volumeStt = Number((p.volumeStt * 0.35 + ov.volume * 0.65).toFixed(3));
+        p.volumeStt = Number(
+          (p.volumeStt * 0.35 + ov.volume * 0.65).toFixed(3)
+        );
         p.txCount = Math.max(p.txCount, ov.tx);
       }
     }
@@ -216,9 +215,6 @@ function computeHistoricalInsights(
   events: WhaleTransaction[],
   series: HistoricalPoint[]
 ) {
-  // For 3D/7D use existing live events if any, otherwise infer from series.
-  // For 1M, expand by "simulating" additional tx count based on series.
-  // For 6M/1Y, purely aggregated from series.
   const now = Date.now();
   const days =
     range === "3D"
@@ -253,7 +249,11 @@ function computeHistoricalInsights(
   const largestWei =
     baseEvents.length > 0
       ? baseEvents.reduce((m, e) => (e.amountRaw > m ? e.amountRaw : m), 0n)
-      : BigInt(Math.floor((Math.max(...series.map((p) => p.volumeStt)) / 3) * 1e18));
+      : BigInt(
+          Math.floor(
+            (Math.max(...series.map((p) => p.volumeStt)) / 3) * 1e18
+          )
+        );
 
   const walletCounts = new Map<string, number>();
   const walletVolumes = new Map<string, bigint>();
@@ -262,7 +262,10 @@ function computeHistoricalInsights(
     if (!address) continue;
     const key = address.toLowerCase();
     walletCounts.set(key, (walletCounts.get(key) ?? 0) + 1);
-    walletVolumes.set(key, (walletVolumes.get(key) ?? 0n) + (e.amountRaw ?? 0n));
+    walletVolumes.set(
+      key,
+      (walletVolumes.get(key) ?? 0n) + (e.amountRaw ?? 0n)
+    );
   }
 
   const mostActive = getMostActiveWallet(baseEvents);
@@ -273,7 +276,13 @@ function computeHistoricalInsights(
       txCount: count,
       volumeWei: walletVolumes.get(wallet) ?? 0n,
     }))
-    .sort((a, b) => (a.volumeWei === b.volumeWei ? b.txCount - a.txCount : a.volumeWei > b.volumeWei ? -1 : 1))
+    .sort((a, b) =>
+      a.volumeWei === b.volumeWei
+        ? b.txCount - a.txCount
+        : a.volumeWei > b.volumeWei
+        ? -1
+        : 1
+    )
     .slice(0, 3);
 
   return {
@@ -343,20 +352,27 @@ function getMostActiveWallet(transactions: WhaleTransaction[]) {
     byWallet.set(key, curr);
   }
 
-  let best: { address: string; txCount: number; totalVolumeWei: bigint } | null =
-    null;
+  let best: {
+    address: string;
+    txCount: number;
+    totalVolumeWei: bigint;
+  } | null = null;
   for (const w of byWallet.values()) {
     if (!best) {
       best = w;
       continue;
     }
     if (w.txCount > best.txCount) best = w;
-    else if (w.txCount === best.txCount && w.totalVolumeWei > best.totalVolumeWei)
+    else if (
+      w.txCount === best.txCount &&
+      w.totalVolumeWei > best.totalVolumeWei
+    )
       best = w;
   }
 
   return best;
 }
+
 export default function Home() {
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -464,6 +480,8 @@ export default function Home() {
 
   useEffect(() => {
     console.log("[Home] mounted. Starting raw JSON-RPC polling.");
+    // Log that the Somnia Reactivity SDK client has been initialised
+    console.log("[Reactivity] client initialised:", reactivityClient !== null);
     let isCancelled = false;
 
     const pollOnce = async () => {
@@ -528,7 +546,9 @@ export default function Home() {
           const timestampSeconds = hexToBigInt(block.timestamp);
           const timestampMs = Number(timestampSeconds) * 1000;
 
-          const txs = Array.isArray(block.transactions) ? block.transactions : [];
+          const txs = Array.isArray(block.transactions)
+            ? block.transactions
+            : [];
           console.log(
             "[poll] block",
             blockNumber.toString(),
@@ -587,7 +607,6 @@ export default function Home() {
       }
     };
 
-    // Initial poll, then interval every 5 seconds
     void pollOnce();
     const intervalId = setInterval(() => {
       void pollOnce();
@@ -711,7 +730,7 @@ export default function Home() {
         .neon-border {
           border-color: rgba(0, 255, 255, 0.22);
           box-shadow: 0 0 0 1px rgba(0, 255, 255, 0.12),
-            0 0 26px rgba(0, 255, 255, 0.10),
+            0 0 26px rgba(0, 255, 255, 0.1),
             0 0 42px rgba(0, 255, 136, 0.06);
         }
 
@@ -731,7 +750,7 @@ export default function Home() {
           border: 1px solid rgba(0, 255, 255, 0.22);
           background: rgba(0, 0, 0, 0.25);
           box-shadow: 0 0 0 1px rgba(0, 255, 255, 0.1),
-            0 0 22px rgba(0, 255, 255, 0.10);
+            0 0 22px rgba(0, 255, 255, 0.1);
         }
         .segmented button {
           padding: 8px 12px;
@@ -785,19 +804,14 @@ export default function Home() {
         }
       `}</style>
 
-      {/* Terminal overlays */}
       <div className="pointer-events-none fixed inset-0 -z-10">
-        {/* Grid */}
         <div className="absolute inset-0 opacity-60 [background-image:linear-gradient(to_right,var(--grid)_1px,transparent_1px),linear-gradient(to_bottom,var(--grid)_1px,transparent_1px)] [background-size:44px_44px]" />
-        {/* Subtle matrix drift */}
         <div className="matrix-bg absolute inset-0 opacity-35 [background-image:repeating-linear-gradient(180deg,rgba(0,255,136,0.12)_0px,rgba(0,255,136,0.12)_1px,transparent_1px,transparent_14px)] [background-size:100%_240px]" />
-        {/* Scanlines */}
         <div className="absolute inset-0 opacity-30 [background-image:repeating-linear-gradient(180deg,var(--scan)_0px,var(--scan)_1px,transparent_2px,transparent_4px)]" />
-        {/* Sweeping scanline */}
         <div className="terminal-scanline absolute -top-1/3 left-0 right-0 h-40 bg-gradient-to-b from-transparent via-[rgba(0,255,255,0.10)] to-transparent blur-sm" />
-        {/* Vignette */}
         <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,transparent_0%,rgba(0,0,0,0.35)_55%,rgba(0,0,0,0.65)_100%)]" />
       </div>
+
       <div className="sticky top-0 z-50 border-b border-cyan-500/20 bg-[#0a0a0f]/85 backdrop-blur">
         <div className="relative overflow-hidden">
           <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-[rgba(0,255,255,0.12)] via-transparent to-[rgba(0,255,136,0.10)]" />
@@ -1020,240 +1034,246 @@ export default function Home() {
                   : "pointer-events-none absolute inset-0 opacity-0 -translate-y-2",
               ].join(" ")}
             >
-              {timeRange !== "LIVE" && historicalSeries && historicalInsights ? (
+              {timeRange !== "LIVE" &&
+              historicalSeries &&
+              historicalInsights ? (
                 <div className="space-y-4">
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                <div className="neon-border rounded-xl border bg-black/25 px-4 py-3 font-terminal">
-                  <div className="text-[10px] font-medium uppercase tracking-[0.18em] text-slate-500">
-                    Total Whale Volume
-                  </div>
-                  <div className="ticker-glow mt-1 text-lg font-semibold text-[color:var(--neon)]">
-                    {formatCompact(animatedVolume)} STT
-                  </div>
-                </div>
-                <div className="neon-border rounded-xl border bg-black/25 px-4 py-3 font-terminal">
-                  <div className="text-[10px] font-medium uppercase tracking-[0.18em] text-slate-500">
-                    Whale Transactions
-                  </div>
-                  <div className="ticker-glow mt-1 text-lg font-semibold text-slate-100">
-                    {Math.round(animatedTxs).toLocaleString()}
-                  </div>
-                </div>
-                <div className="neon-border rounded-xl border bg-black/25 px-4 py-3 font-terminal">
-                  <div className="text-[10px] font-medium uppercase tracking-[0.18em] text-slate-500">
-                    Largest Transaction
-                  </div>
-                  <div className="ticker-glow mt-1 text-lg font-semibold text-[color:var(--cyan)]">
-                    {formatCompact(animatedLargest)} STT
-                  </div>
-                </div>
-                <div className="neon-border rounded-xl border bg-black/25 px-4 py-3 font-terminal">
-                  <div className="text-[10px] font-medium uppercase tracking-[0.18em] text-slate-500">
-                    Most Active Wallet
-                  </div>
-                  {historicalInsights.mostActiveWallet === "—" ? (
-                    <div className="mt-1 text-sm font-semibold text-slate-500">
-                      No activity detected
-                    </div>
-                  ) : (
-                    <div className="mt-1 space-y-1">
-                      <div className="flex items-center gap-2">
-                        <span className="text-base leading-none">👑</span>
-                        <a
-                          href={`https://shannon-explorer.somnia.network/address/${historicalInsights.mostActiveWallet}`}
-                          target="_blank"
-                          rel="noreferrer noopener"
-                          className="ticker-glow truncate text-sm font-semibold text-slate-100 transition hover:text-[color:var(--cyan)] hover:underline"
-                          title={historicalInsights.mostActiveWallet}
-                        >
-                          {shortenAddress(historicalInsights.mostActiveWallet)}
-                        </a>
+                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                    <div className="neon-border rounded-xl border bg-black/25 px-4 py-3 font-terminal">
+                      <div className="text-[10px] font-medium uppercase tracking-[0.18em] text-slate-500">
+                        Total Whale Volume
                       </div>
-                      <div className="flex items-center justify-between gap-3 text-[11px] text-slate-400">
-                        <span>
-                          <span className="font-semibold text-slate-200">
-                            {historicalInsights.mostActiveWalletTxs}
-                          </span>{" "}
-                          txs
-                        </span>
-                        <span className="font-semibold text-[color:var(--neon)]">
-                          {formatSttFromWei(
-                            historicalInsights.mostActiveWalletVolumeWei,
-                            2
-                          )}
-                        </span>
+                      <div className="ticker-glow mt-1 text-lg font-semibold text-[color:var(--neon)]">
+                        {formatCompact(animatedVolume)} STT
                       </div>
                     </div>
-                  )}
-                </div>
-              </div>
-
-              <div className="grid gap-3 lg:grid-cols-3">
-                <div className="neon-border rounded-2xl border bg-black/20 p-4 lg:col-span-2">
-                  <div className="mb-3 flex items-center justify-between gap-3">
-                    <div className="font-terminal text-xs font-semibold tracking-[0.16em] text-slate-300">
-                      Whale Volume Over Time
-                    </div>
-                    <div className="font-terminal text-[11px] text-slate-500">
-                      Range:{" "}
-                      <span className="ticker-glow font-semibold text-slate-200">
-                        {timeRange}
-                      </span>
-                    </div>
-                  </div>
-                  <div className="h-[260px] w-full">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <AreaChart data={historicalSeries}>
-                        <defs>
-                          <linearGradient
-                            id="volFill"
-                            x1="0"
-                            y1="0"
-                            x2="0"
-                            y2="1"
-                          >
-                            <stop
-                              offset="0%"
-                              stopColor="rgba(0,255,255,0.38)"
-                            />
-                            <stop
-                              offset="55%"
-                              stopColor="rgba(0,255,136,0.16)"
-                            />
-                            <stop
-                              offset="100%"
-                              stopColor="rgba(0,0,0,0)"
-                            />
-                          </linearGradient>
-                        </defs>
-                        <CartesianGrid
-                          stroke="rgba(0,255,255,0.10)"
-                          vertical={false}
-                        />
-                        <XAxis
-                          dataKey="label"
-                          tick={{
-                            fill: "rgba(226,232,240,0.65)",
-                            fontSize: 10,
-                          }}
-                          axisLine={{ stroke: "rgba(0,255,255,0.18)" }}
-                          tickLine={{ stroke: "rgba(0,255,255,0.12)" }}
-                          interval="preserveStartEnd"
-                        />
-                        <YAxis
-                          tick={{
-                            fill: "rgba(226,232,240,0.65)",
-                            fontSize: 10,
-                          }}
-                          axisLine={{ stroke: "rgba(0,255,255,0.18)" }}
-                          tickLine={{ stroke: "rgba(0,255,255,0.12)" }}
-                          width={46}
-                        />
-                        <Tooltip
-                          contentStyle={{
-                            background: "rgba(0,0,0,0.85)",
-                            border: "1px solid rgba(0,255,255,0.25)",
-                            borderRadius: 12,
-                            color: "rgba(226,232,240,0.9)",
-                            fontFamily: "var(--mono)",
-                            fontSize: 12,
-                            boxShadow:
-                              "0 0 26px rgba(0,255,255,0.12), 0 0 36px rgba(0,255,136,0.08)",
-                          }}
-                          labelStyle={{ color: "rgba(0,255,255,0.9)" }}
-                          formatter={(v: any) => {
-                            const n = typeof v === "number" ? v : Number(v);
-                            return [
-                              `${formatWithCommas(n, 2)} STT`,
-                              "Whale volume",
-                            ];
-                          }}
-                          labelFormatter={(label: any) =>
-                            `Time: ${String(label)}`
-                          }
-                        />
-                        <Area
-                          type="monotone"
-                          dataKey="volumeStt"
-                          stroke="rgba(0,255,255,0.98)"
-                          strokeWidth={2}
-                          fill="url(#volFill)"
-                          dot={false}
-                          activeDot={{
-                            r: 4,
-                            stroke: "rgba(0,255,255,1)",
-                            strokeWidth: 2,
-                            fill: "rgba(0,255,136,1)",
-                            style: {
-                              filter:
-                                "drop-shadow(0 0 10px rgba(0,255,255,0.45)) drop-shadow(0 0 12px rgba(0,255,136,0.30))",
-                            },
-                          }}
-                        />
-                      </AreaChart>
-                    </ResponsiveContainer>
-                  </div>
-                </div>
-
-                <div className="neon-border rounded-2xl border bg-black/20 p-4">
-                  <div className="mb-3 flex items-center justify-between gap-3">
-                    <div className="font-terminal text-xs font-semibold tracking-[0.16em] text-slate-300">
-                      Top Whale Wallets
-                    </div>
-                    <div className="font-terminal text-[11px] text-slate-500">
-                      By volume
-                    </div>
-                  </div>
-
-                  <div className="space-y-2">
-                    {(historicalInsights.topWhaleWallets ?? []).length === 0 ? (
-                      <div className="font-terminal text-xs text-slate-500">
-                        Not enough live data to rank wallets yet.
+                    <div className="neon-border rounded-xl border bg-black/25 px-4 py-3 font-terminal">
+                      <div className="text-[10px] font-medium uppercase tracking-[0.18em] text-slate-500">
+                        Whale Transactions
                       </div>
-                    ) : (
-                      historicalInsights.topWhaleWallets.map((w, idx) => (
-                        <div
-                          key={`${w.wallet}-${idx}`}
-                          className="rounded-xl border border-cyan-500/10 bg-black/25 px-3 py-2"
-                        >
-                          <div className="flex items-center justify-between gap-3">
-                            <div className="min-w-0">
-                              <div className="font-terminal text-[10px] uppercase tracking-[0.18em] text-slate-500">
-                                #{idx + 1}
-                              </div>
-                              <a
-                                href={`https://shannon-explorer.somnia.network/address/${w.wallet}`}
-                                target="_blank"
-                                rel="noreferrer noopener"
-                                className="font-terminal block truncate text-sm font-semibold text-slate-100 transition hover:text-[color:var(--cyan)] hover:underline"
-                                title={w.wallet}
-                              >
-                                {shortenAddress(w.wallet)}
-                              </a>
-                            </div>
-                            <div className="text-right">
-                              <div className="font-terminal text-sm font-semibold text-[color:var(--neon)]">
-                                {formatSttFromWei(w.volumeWei, 2)}
-                              </div>
-                              <div className="font-terminal text-[11px] text-slate-500">
-                                {w.txCount} tx
-                              </div>
-                            </div>
+                      <div className="ticker-glow mt-1 text-lg font-semibold text-slate-100">
+                        {Math.round(animatedTxs).toLocaleString()}
+                      </div>
+                    </div>
+                    <div className="neon-border rounded-xl border bg-black/25 px-4 py-3 font-terminal">
+                      <div className="text-[10px] font-medium uppercase tracking-[0.18em] text-slate-500">
+                        Largest Transaction
+                      </div>
+                      <div className="ticker-glow mt-1 text-lg font-semibold text-[color:var(--cyan)]">
+                        {formatCompact(animatedLargest)} STT
+                      </div>
+                    </div>
+                    <div className="neon-border rounded-xl border bg-black/25 px-4 py-3 font-terminal">
+                      <div className="text-[10px] font-medium uppercase tracking-[0.18em] text-slate-500">
+                        Most Active Wallet
+                      </div>
+                      {historicalInsights.mostActiveWallet === "—" ? (
+                        <div className="mt-1 text-sm font-semibold text-slate-500">
+                          No activity detected
+                        </div>
+                      ) : (
+                        <div className="mt-1 space-y-1">
+                          <div className="flex items-center gap-2">
+                            <span className="text-base leading-none">👑</span>
+                            <a
+                              href={`https://shannon-explorer.somnia.network/address/${historicalInsights.mostActiveWallet}`}
+                              target="_blank"
+                              rel="noreferrer noopener"
+                              className="ticker-glow truncate text-sm font-semibold text-slate-100 transition hover:text-[color:var(--cyan)] hover:underline"
+                              title={historicalInsights.mostActiveWallet}
+                            >
+                              {shortenAddress(
+                                historicalInsights.mostActiveWallet
+                              )}
+                            </a>
+                          </div>
+                          <div className="flex items-center justify-between gap-3 text-[11px] text-slate-400">
+                            <span>
+                              <span className="font-semibold text-slate-200">
+                                {historicalInsights.mostActiveWalletTxs}
+                              </span>{" "}
+                              txs
+                            </span>
+                            <span className="font-semibold text-[color:var(--neon)]">
+                              {formatSttFromWei(
+                                historicalInsights.mostActiveWalletVolumeWei,
+                                2
+                              )}
+                            </span>
                           </div>
                         </div>
-                      ))
-                    )}
+                      )}
+                    </div>
                   </div>
-                </div>
-              </div>
 
-              <div className="neon-border rounded-2xl border bg-black/15 p-4 font-terminal text-xs text-slate-400">
-                Live feed is hidden in historical mode. Switch back to{" "}
-                <span className="ticker-glow font-semibold text-[color:var(--cyan)]">
-                  LIVE
-                </span>{" "}
-                to see incoming transactions.
-              </div>
+                  <div className="grid gap-3 lg:grid-cols-3">
+                    <div className="neon-border rounded-2xl border bg-black/20 p-4 lg:col-span-2">
+                      <div className="mb-3 flex items-center justify-between gap-3">
+                        <div className="font-terminal text-xs font-semibold tracking-[0.16em] text-slate-300">
+                          Whale Volume Over Time
+                        </div>
+                        <div className="font-terminal text-[11px] text-slate-500">
+                          Range:{" "}
+                          <span className="ticker-glow font-semibold text-slate-200">
+                            {timeRange}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="h-[260px] w-full">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <AreaChart data={historicalSeries}>
+                            <defs>
+                              <linearGradient
+                                id="volFill"
+                                x1="0"
+                                y1="0"
+                                x2="0"
+                                y2="1"
+                              >
+                                <stop
+                                  offset="0%"
+                                  stopColor="rgba(0,255,255,0.38)"
+                                />
+                                <stop
+                                  offset="55%"
+                                  stopColor="rgba(0,255,136,0.16)"
+                                />
+                                <stop
+                                  offset="100%"
+                                  stopColor="rgba(0,0,0,0)"
+                                />
+                              </linearGradient>
+                            </defs>
+                            <CartesianGrid
+                              stroke="rgba(0,255,255,0.10)"
+                              vertical={false}
+                            />
+                            <XAxis
+                              dataKey="label"
+                              tick={{
+                                fill: "rgba(226,232,240,0.65)",
+                                fontSize: 10,
+                              }}
+                              axisLine={{ stroke: "rgba(0,255,255,0.18)" }}
+                              tickLine={{ stroke: "rgba(0,255,255,0.12)" }}
+                              interval="preserveStartEnd"
+                            />
+                            <YAxis
+                              tick={{
+                                fill: "rgba(226,232,240,0.65)",
+                                fontSize: 10,
+                              }}
+                              axisLine={{ stroke: "rgba(0,255,255,0.18)" }}
+                              tickLine={{ stroke: "rgba(0,255,255,0.12)" }}
+                              width={46}
+                            />
+                            <Tooltip
+                              contentStyle={{
+                                background: "rgba(0,0,0,0.85)",
+                                border: "1px solid rgba(0,255,255,0.25)",
+                                borderRadius: 12,
+                                color: "rgba(226,232,240,0.9)",
+                                fontFamily: "var(--mono)",
+                                fontSize: 12,
+                                boxShadow:
+                                  "0 0 26px rgba(0,255,255,0.12), 0 0 36px rgba(0,255,136,0.08)",
+                              }}
+                              labelStyle={{ color: "rgba(0,255,255,0.9)" }}
+                              formatter={(v: any) => {
+                                const n =
+                                  typeof v === "number" ? v : Number(v);
+                                return [
+                                  `${formatWithCommas(n, 2)} STT`,
+                                  "Whale volume",
+                                ];
+                              }}
+                              labelFormatter={(label: any) =>
+                                `Time: ${String(label)}`
+                              }
+                            />
+                            <Area
+                              type="monotone"
+                              dataKey="volumeStt"
+                              stroke="rgba(0,255,255,0.98)"
+                              strokeWidth={2}
+                              fill="url(#volFill)"
+                              dot={false}
+                              activeDot={{
+                                r: 4,
+                                stroke: "rgba(0,255,255,1)",
+                                strokeWidth: 2,
+                                fill: "rgba(0,255,136,1)",
+                                style: {
+                                  filter:
+                                    "drop-shadow(0 0 10px rgba(0,255,255,0.45)) drop-shadow(0 0 12px rgba(0,255,136,0.30))",
+                                },
+                              }}
+                            />
+                          </AreaChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </div>
+
+                    <div className="neon-border rounded-2xl border bg-black/20 p-4">
+                      <div className="mb-3 flex items-center justify-between gap-3">
+                        <div className="font-terminal text-xs font-semibold tracking-[0.16em] text-slate-300">
+                          Top Whale Wallets
+                        </div>
+                        <div className="font-terminal text-[11px] text-slate-500">
+                          By volume
+                        </div>
+                      </div>
+
+                      <div className="space-y-2">
+                        {(historicalInsights.topWhaleWallets ?? []).length ===
+                        0 ? (
+                          <div className="font-terminal text-xs text-slate-500">
+                            Not enough live data to rank wallets yet.
+                          </div>
+                        ) : (
+                          historicalInsights.topWhaleWallets.map((w, idx) => (
+                            <div
+                              key={`${w.wallet}-${idx}`}
+                              className="rounded-xl border border-cyan-500/10 bg-black/25 px-3 py-2"
+                            >
+                              <div className="flex items-center justify-between gap-3">
+                                <div className="min-w-0">
+                                  <div className="font-terminal text-[10px] uppercase tracking-[0.18em] text-slate-500">
+                                    #{idx + 1}
+                                  </div>
+                                  <a
+                                    href={`https://shannon-explorer.somnia.network/address/${w.wallet}`}
+                                    target="_blank"
+                                    rel="noreferrer noopener"
+                                    className="font-terminal block truncate text-sm font-semibold text-slate-100 transition hover:text-[color:var(--cyan)] hover:underline"
+                                    title={w.wallet}
+                                  >
+                                    {shortenAddress(w.wallet)}
+                                  </a>
+                                </div>
+                                <div className="text-right">
+                                  <div className="font-terminal text-sm font-semibold text-[color:var(--neon)]">
+                                    {formatSttFromWei(w.volumeWei, 2)}
+                                  </div>
+                                  <div className="font-terminal text-[11px] text-slate-500">
+                                    {w.txCount} tx
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="neon-border rounded-2xl border bg-black/15 p-4 font-terminal text-xs text-slate-400">
+                    Live feed is hidden in historical mode. Switch back to{" "}
+                    <span className="ticker-glow font-semibold text-[color:var(--cyan)]">
+                      LIVE
+                    </span>{" "}
+                    to see incoming transactions.
+                  </div>
                 </div>
               ) : null}
             </div>
@@ -1266,149 +1286,151 @@ export default function Home() {
                   : "pointer-events-none absolute inset-0 opacity-0 translate-y-2",
               ].join(" ")}
             >
-              {timeRange === "LIVE" && <div className="space-y-4">
-              <div className="flex items-center justify-between gap-4">
-            <div className="flex items-center gap-3 text-sm text-slate-300 font-terminal">
-              <span className="neon-border inline-flex h-8 w-8 items-center justify-center rounded-full border bg-black/25 text-xs font-semibold text-[color:var(--cyan)]">
-                {filteredEvents.length}
-              </span>
-              <span>
-                Detected transactions (newest first).
-              </span>
-            </div>
-            <button
-              type="button"
-              onClick={clearFeed}
-              className="font-terminal inline-flex items-center justify-center rounded-full border border-cyan-500/25 bg-black/30 px-4 py-2 text-xs font-semibold text-slate-100 transition hover:border-cyan-400/60 hover:text-[color:var(--cyan)] hover:shadow-[0_0_22px_rgba(0,255,255,0.18)] focus:outline-none focus:ring-2 focus:ring-cyan-400/60 focus:ring-offset-2 focus:ring-offset-[#0a0a0f] disabled:cursor-not-allowed disabled:opacity-50"
-              disabled={events.length === 0}
-              aria-disabled={events.length === 0}
-            >
-              Clear Feed
-            </button>
-          </div>
-
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <div className="relative w-full sm:max-w-xl">
-              <input
-                value={walletFilter}
-                onChange={(e) => setWalletFilter(e.target.value)}
-                placeholder="Filter by wallet address (e.g. 0xabc...)"
-                className="font-terminal w-full rounded-xl border border-cyan-500/20 bg-black/30 px-4 py-3 text-sm text-slate-100 placeholder:text-slate-500 shadow-[0_12px_40px_rgba(0,255,255,0.06)] outline-none transition focus:border-cyan-400/60 focus:ring-2 focus:ring-cyan-400/30"
-                spellCheck={false}
-                autoCapitalize="none"
-                autoCorrect="off"
-                inputMode="text"
-              />
-              {walletFilter.trim().length > 0 && (
-                <button
-                  type="button"
-                  onClick={() => setWalletFilter("")}
-                  className="font-terminal absolute right-2 top-1/2 -translate-y-1/2 rounded-lg px-2 py-1 text-xs font-semibold text-slate-400 transition hover:bg-white/5 hover:text-[color:var(--cyan)] focus:outline-none focus:ring-2 focus:ring-cyan-400/40"
-                  aria-label="Clear wallet filter"
-                >
-                  Clear
-                </button>
-              )}
-            </div>
-            <div className="font-terminal text-xs text-slate-400 sm:text-right">
-              Showing{" "}
-              <span className="ticker-glow font-semibold text-slate-100">
-                {filteredEvents.length}
-              </span>{" "}
-              of{" "}
-              <span className="ticker-glow font-semibold text-slate-100">
-                {events.length}
-              </span>
-            </div>
-          </div>
-
-          <div className="neon-border relative flex-1 overflow-hidden rounded-2xl border bg-black/20 shadow-[0_18px_90px_rgba(0,255,255,0.07)]">
-            <div className="pointer-events-none absolute inset-x-0 top-0 h-24 bg-gradient-to-b from-[rgba(0,255,255,0.16)] via-transparent to-transparent blur-2xl" />
-
-            <div className="relative h-full">
-              <div className="font-terminal grid grid-cols-[16px_minmax(0,2.6fr)_minmax(0,1.6fr)_minmax(0,3fr)_minmax(0,1.7fr)] gap-3 border-b border-cyan-500/15 bg-black/30 px-4 py-2 text-[10px] font-medium uppercase tracking-[0.18em] text-slate-500 sm:px-6">
-                <div />
-                <div>Wallet</div>
-                <div>Amount</div>
-                <div>Transaction</div>
-                <div className="text-right">Time</div>
-              </div>
-
-              <div className="h-[480px] overflow-y-auto px-2 py-2 sm:px-4">
-                {filteredEvents.length === 0 ? (
-                  <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-sm text-slate-500">
-                    <p>
-                      {events.length === 0
-                        ? "No whale transactions detected yet."
-                        : "No matches for the current filter."}
-                    </p>
-                    <p className="text-xs text-slate-500">
-                      Keep this page open to watch the live feed as whales move
-                      on Somnia Testnet.
-                    </p>
+              {timeRange === "LIVE" && (
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="flex items-center gap-3 text-sm text-slate-300 font-terminal">
+                      <span className="neon-border inline-flex h-8 w-8 items-center justify-center rounded-full border bg-black/25 text-xs font-semibold text-[color:var(--cyan)]">
+                        {filteredEvents.length}
+                      </span>
+                      <span>Detected transactions (newest first).</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={clearFeed}
+                      className="font-terminal inline-flex items-center justify-center rounded-full border border-cyan-500/25 bg-black/30 px-4 py-2 text-xs font-semibold text-slate-100 transition hover:border-cyan-400/60 hover:text-[color:var(--cyan)] hover:shadow-[0_0_22px_rgba(0,255,255,0.18)] focus:outline-none focus:ring-2 focus:ring-cyan-400/60 focus:ring-offset-2 focus:ring-offset-[#0a0a0f] disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={events.length === 0}
+                      aria-disabled={events.length === 0}
+                    >
+                      Clear Feed
+                    </button>
                   </div>
-                ) : (
-                  <ul className="space-y-1">
-                    {filteredEvents.map((event) => (
-                      <li
-                        key={`${event.hash}-${event.timestamp}`}
-                        className="somnia-row-enter group rounded-md border border-cyan-500/10 bg-black/25 px-3 py-1.5 text-[11px] text-slate-200 shadow-[0_10px_40px_rgba(0,0,0,0.55)] transition hover:border-cyan-400/40 hover:bg-black/35 sm:px-4"
-                      >
-                        <div className="font-terminal grid grid-cols-[16px_minmax(0,2.6fr)_minmax(0,1.6fr)_minmax(0,3fr)_minmax(0,1.7fr)] items-center gap-3">
-                          <span
-                            className={[
-                              "h-2.5 w-2.5 rounded-full",
-                              sizeDotClass(event.amountRaw),
-                            ].join(" ")}
-                            aria-hidden="true"
-                            title={`Size: ${classifySize(event.amountRaw)}`}
-                          />
-                          <div className="flex min-w-0 items-center gap-2">
-                            <span className="text-sm leading-none">🐋</span>
-                            <a
-                              href={`https://shannon-explorer.somnia.network/address/${event.walletAddress}`}
-                              target="_blank"
-                              rel="noreferrer noopener"
-                              className="min-w-0 truncate text-[11px] text-slate-200 underline-offset-2 transition hover:text-[color:var(--cyan)] hover:underline hover:shadow-[0_0_18px_rgba(0,255,255,0.25)]"
-                            >
-                              {event.walletAddress}
-                            </a>
+
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="relative w-full sm:max-w-xl">
+                      <input
+                        value={walletFilter}
+                        onChange={(e) => setWalletFilter(e.target.value)}
+                        placeholder="Filter by wallet address (e.g. 0xabc...)"
+                        className="font-terminal w-full rounded-xl border border-cyan-500/20 bg-black/30 px-4 py-3 text-sm text-slate-100 placeholder:text-slate-500 shadow-[0_12px_40px_rgba(0,255,255,0.06)] outline-none transition focus:border-cyan-400/60 focus:ring-2 focus:ring-cyan-400/30"
+                        spellCheck={false}
+                        autoCapitalize="none"
+                        autoCorrect="off"
+                        inputMode="text"
+                      />
+                      {walletFilter.trim().length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setWalletFilter("")}
+                          className="font-terminal absolute right-2 top-1/2 -translate-y-1/2 rounded-lg px-2 py-1 text-xs font-semibold text-slate-400 transition hover:bg-white/5 hover:text-[color:var(--cyan)] focus:outline-none focus:ring-2 focus:ring-cyan-400/40"
+                          aria-label="Clear wallet filter"
+                        >
+                          Clear
+                        </button>
+                      )}
+                    </div>
+                    <div className="font-terminal text-xs text-slate-400 sm:text-right">
+                      Showing{" "}
+                      <span className="ticker-glow font-semibold text-slate-100">
+                        {filteredEvents.length}
+                      </span>{" "}
+                      of{" "}
+                      <span className="ticker-glow font-semibold text-slate-100">
+                        {events.length}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="neon-border relative flex-1 overflow-hidden rounded-2xl border bg-black/20 shadow-[0_18px_90px_rgba(0,255,255,0.07)]">
+                    <div className="pointer-events-none absolute inset-x-0 top-0 h-24 bg-gradient-to-b from-[rgba(0,255,255,0.16)] via-transparent to-transparent blur-2xl" />
+
+                    <div className="relative h-full">
+                      <div className="font-terminal grid grid-cols-[16px_minmax(0,2.6fr)_minmax(0,1.6fr)_minmax(0,3fr)_minmax(0,1.7fr)] gap-3 border-b border-cyan-500/15 bg-black/30 px-4 py-2 text-[10px] font-medium uppercase tracking-[0.18em] text-slate-500 sm:px-6">
+                        <div />
+                        <div>Wallet</div>
+                        <div>Amount</div>
+                        <div>Transaction</div>
+                        <div className="text-right">Time</div>
+                      </div>
+
+                      <div className="h-[480px] overflow-y-auto px-2 py-2 sm:px-4">
+                        {filteredEvents.length === 0 ? (
+                          <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-sm text-slate-500">
+                            <p>
+                              {events.length === 0
+                                ? "No whale transactions detected yet."
+                                : "No matches for the current filter."}
+                            </p>
+                            <p className="text-xs text-slate-500">
+                              Keep this page open to watch the live feed as
+                              whales move on Somnia Testnet.
+                            </p>
                           </div>
-                          <div
-                            className={[
-                              "font-semibold tabular-nums",
-                              amountColorClass(event.amountRaw),
-                            ].join(" ")}
-                          >
-                            {event.amountFormatted}
-                          </div>
-                          <div className="flex flex-col gap-1">
-                            <a
-                              href={`https://shannon-explorer.somnia.network/tx/${event.hash}`}
-                              target="_blank"
-                              rel="noreferrer noopener"
-                              className="truncate text-[11px] text-slate-400 underline-offset-2 transition hover:text-[color:var(--cyan)] hover:underline hover:shadow-[0_0_18px_rgba(0,255,255,0.25)]"
-                            >
-                              {event.hash}
-                            </a>
-                            {event.blockNumber != null && (
-                              <span className="text-[10px] text-slate-500 sm:text-[11px]">
-                                Block #{event.blockNumber.toString()}
-                              </span>
-                            )}
-                          </div>
-                          <div className="text-right text-[11px] text-slate-300">
-                            {event.timestamp}
-                          </div>
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            </div>
-          </div>
-              </div>}
+                        ) : (
+                          <ul className="space-y-1">
+                            {filteredEvents.map((event) => (
+                              <li
+                                key={`${event.hash}-${event.timestamp}`}
+                                className="somnia-row-enter group rounded-md border border-cyan-500/10 bg-black/25 px-3 py-1.5 text-[11px] text-slate-200 shadow-[0_10px_40px_rgba(0,0,0,0.55)] transition hover:border-cyan-400/40 hover:bg-black/35 sm:px-4"
+                              >
+                                <div className="font-terminal grid grid-cols-[16px_minmax(0,2.6fr)_minmax(0,1.6fr)_minmax(0,3fr)_minmax(0,1.7fr)] items-center gap-3">
+                                  <span
+                                    className={[
+                                      "h-2.5 w-2.5 rounded-full",
+                                      sizeDotClass(event.amountRaw),
+                                    ].join(" ")}
+                                    aria-hidden="true"
+                                    title={`Size: ${classifySize(event.amountRaw)}`}
+                                  />
+                                  <div className="flex min-w-0 items-center gap-2">
+                                    <span className="text-sm leading-none">
+                                      🐋
+                                    </span>
+                                    <a
+                                      href={`https://shannon-explorer.somnia.network/address/${event.walletAddress}`}
+                                      target="_blank"
+                                      rel="noreferrer noopener"
+                                      className="min-w-0 truncate text-[11px] text-slate-200 underline-offset-2 transition hover:text-[color:var(--cyan)] hover:underline hover:shadow-[0_0_18px_rgba(0,255,255,0.25)]"
+                                    >
+                                      {event.walletAddress}
+                                    </a>
+                                  </div>
+                                  <div
+                                    className={[
+                                      "font-semibold tabular-nums",
+                                      amountColorClass(event.amountRaw),
+                                    ].join(" ")}
+                                  >
+                                    {event.amountFormatted}
+                                  </div>
+                                  <div className="flex flex-col gap-1">
+                                    <a
+                                      href={`https://shannon-explorer.somnia.network/tx/${event.hash}`}
+                                      target="_blank"
+                                      rel="noreferrer noopener"
+                                      className="truncate text-[11px] text-slate-400 underline-offset-2 transition hover:text-[color:var(--cyan)] hover:underline hover:shadow-[0_0_18px_rgba(0,255,255,0.25)]"
+                                    >
+                                      {event.hash}
+                                    </a>
+                                    {event.blockNumber != null && (
+                                      <span className="text-[10px] text-slate-500 sm:text-[11px]">
+                                        Block #{event.blockNumber.toString()}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="text-right text-[11px] text-slate-300">
+                                    {event.timestamp}
+                                  </div>
+                                </div>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </section>
