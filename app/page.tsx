@@ -10,11 +10,23 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { ReactivityClient } from "@somnia-chain/reactivity";
 
 const RPC_URL = "/api/blocks";
 const WEI_PER_STT = 10n ** 18n;
-const MIN_VALUE_WEI = 1n; // value > 0
+const MIN_VALUE_WEI = 1n;
 const MIN_VALUE_LABEL = "> 0 STT";
+const SOMNIA_WS_URL = "wss://dream-rpc.somnia.network/ws";
+
+// Initialise the Somnia Reactivity client (WebSocket-based event listener).
+// The client is created once at module level so it persists across renders.
+// If the WebSocket is unavailable the app gracefully falls back to HTTP polling.
+let reactivityClient: ReactivityClient | null = null;
+try {
+  reactivityClient = new ReactivityClient({ url: SOMNIA_WS_URL });
+} catch (e) {
+  console.warn("[Reactivity] Could not initialise ReactivityClient:", e);
+}
 
 type WhaleTransaction = {
   hash: string;
