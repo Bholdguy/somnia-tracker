@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ReactivityClient } from "@somnia-chain/reactivity";
+import { Reactivity } from "@somnia-chain/reactivity";
 import {
   Area,
   AreaChart,
@@ -18,9 +18,9 @@ const MIN_VALUE_WEI = 1n;
 const MIN_VALUE_LABEL = "> 0 STT";
 const SOMNIA_WS_URL = "wss://dream-rpc.somnia.network/ws";
 
-let reactivityClient: ReactivityClient | null = null;
+let reactivityClient: Reactivity | null = null;
 try {
-  reactivityClient = new ReactivityClient({ url: SOMNIA_WS_URL });
+  reactivityClient = new Reactivity({ url: SOMNIA_WS_URL });
 } catch (e) {
   console.warn("[Reactivity] Could not initialise ReactivityClient:", e);
 }
