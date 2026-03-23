@@ -16,15 +16,29 @@ const RPC_URL = "/api/blocks";
 const WEI_PER_STT = 10n ** 18n;
 const MIN_VALUE_WEI = 1n;
 const MIN_VALUE_LABEL = "> 0 STT";
-const SOMNIA_WS_URL = "wss://dream-rpc.somnia.network/ws";
+import { createPublicClient, http } from "viem";
+
+const somniaTestnet = {
+  id: 50312,
+  name: "Somnia Testnet",
+  network: "somnia-testnet",
+  nativeCurrency: { name: "STT", symbol: "STT", decimals: 18 },
+  rpcUrls: {
+    default: { http: ["https://dream-rpc.somnia.network"] },
+    public: { http: ["https://dream-rpc.somnia.network"] },
+  },
+} as const;
 
 let reactivityClient: SDK | null = null;
 try {
-  reactivityClient = new SDK({ public: null, wallet: null });
+  const publicClient = createPublicClient({
+    chain: somniaTestnet,
+    transport: http(),
+  });
+  reactivityClient = new SDK({ public: publicClient, wallet: null as any });
 } catch (e) {
-  console.warn("[Reactivity] Could not initialise ReactivityClient:", e);
+  console.warn("[Reactivity] Could not initialise SDK:", e);
 }
-
 type WhaleTransaction = {
   hash: string;
   walletAddress: string;
